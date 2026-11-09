@@ -1,4 +1,4 @@
-import { MarkdownView, Notice, Plugin, TFile, TFolder, normalizePath, type WorkspaceLeaf } from "obsidian";
+import { MarkdownView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, normalizePath, type ViewState } from "obsidian";
 import { DefterView, VIEW_TYPE, type DefterHost } from "./view";
 import { FRONTMATTER_KEY, emptyNotebook, fromLegacy, isNotebookText, serializeNotebook } from "./format";
 
@@ -12,11 +12,11 @@ export default class DefterPlugin extends Plugin implements DefterHost {
   async onload() {
     this.registerView(VIEW_TYPE, (leaf) => new DefterView(leaf, this));
 
+    this.interceptOpen();
     this.app.workspace.onLayoutReady(() => {
       void this.switchLeaves();
       this.reportLegacy();
     });
-    this.registerEvent(this.app.workspace.on("file-open", () => void this.switchLeaves()));
 
     this.addCommand({
       id: "new-notebook",
@@ -67,7 +67,35 @@ export default class DefterPlugin extends Plugin implements DefterHost {
     return isNotebookText(await this.app.vault.cachedRead(file));
   }
 
-  /** Markdown leaves showing a notebook switch to the notebook view. */
+  // A notebook opened as Markdown is redirected to the notebook view before the
+  // view is created. The "file-open" event is too early: the leaf still shows
+  // the previous view then, so switching there silently does nothing.
+  private interceptOpen() {
+    const plugin = this;
+    const proto = WorkspaceLeaf.prototype;
+    const original = proto.setViewState;
+    let active = true;
+    const patched = async function (this: WorkspaceLeaf, state: ViewState, eState?: unknown) {
+      const path = state?.state?.file;
+      // "Open as Markdown" holds only while the leaf stays on that file.
+      if (typeof path === "string" && plugin.markdownLeaves.get(this) !== path) plugin.markdownLeaves.delete(this);
+      if (active && state.type === "markdown" && typeof path === "string" && !plugin.switching.has(this)) {
+        const file = plugin.app.vault.getAbstractFileByPath(path);
+        if (file instanceof TFile && plugin.markdownLeaves.get(this) !== path && (await plugin.isNotebook(file))) {
+          state = { ...state, type: VIEW_TYPE };
+        }
+      }
+      return original.call(this, state, eState);
+    };
+    proto.setViewState = patched;
+    this.register(() => {
+      active = false;
+      // Only restore if no other plugin wrapped it after us; otherwise stay as a pass-through.
+      if (proto.setViewState === patched) proto.setViewState = original;
+    });
+  }
+
+  /** Leaves restored from the saved layout that show a notebook as Markdown. */
   private async switchLeaves() {
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
       const file = (leaf.view as MarkdownView).file;
