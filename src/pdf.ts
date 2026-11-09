@@ -1,4 +1,5 @@
-import { Notice } from "obsidian";
+import { Notice, type App } from "obsidian";
+import { applyBox, drawDecor, drawObjects, pageBox } from "./page-decor";
 import type { Notebook } from "./format";
 import { applyDims, drawStrokes, fontMetrics, lineFormats, pageDims, wobble } from "./render";
 import { inkFor, type NotebookLook } from "./settings";
@@ -17,10 +18,14 @@ function getRemote(): Remote | null {
   }
 }
 
-function renderPage(root: HTMLElement, text: string, ink: Notebook["pages"][number]["ink"], n: number, look: NotebookLook) {
+function renderPage(app: App, root: HTMLElement, title: string, page: Notebook["pages"][number], n: number, look: NotebookLook) {
+  const { text, ink } = page;
   const sheet = root.createDiv("defter-sheet defter-print-sheet");
   const d = pageDims(look.page);
   applyDims(sheet, d);
+  applyBox(sheet, pageBox(page, d));
+  if (page.tpl) sheet.dataset.tpl = page.tpl;
+  drawDecor(sheet.createDiv("defter-decor"), page, d, title);
   sheet.dataset.paper = look.paper;
   sheet.dataset.tone = look.tone;
   const m = fontMetrics(look.font, look.scale);
@@ -49,12 +54,15 @@ function renderPage(root: HTMLElement, text: string, ink: Notebook["pages"][numb
     }
     mirror.appendText("\n");
   }
+  const low = sheet.createDiv("defter-objs defter-objs-low");
   layer("pen");
+  const high = sheet.createDiv("defter-objs defter-objs-high");
+  drawObjects(app, low, high, page, inkFor(look.ink, look.tone));
   sheet.createDiv({ cls: "defter-pageno", text: String(n) });
 }
 
 /** Prints every page through Electron and asks where to save the PDF. */
-export async function exportPdf(title: string, nb: Notebook, look: NotebookLook) {
+export async function exportPdf(app: App, title: string, nb: Notebook, look: NotebookLook) {
   const remote = getRemote();
   if (!remote) {
     new Notice("PDF export needs the Obsidian desktop app.");
@@ -64,8 +72,11 @@ export async function exportPdf(title: string, nb: Notebook, look: NotebookLook)
   // Obsidian's print stylesheet hides everything in <body> except ".print".
   const root = document.body.createDiv("print defter-print");
   try {
-    nb.pages.forEach((p, i) => renderPage(root, p.text, p.ink, i + 1, look));
+    nb.pages.forEach((p, i) => renderPage(app, root, title, p, i + 1, look));
     await document.fonts.ready;
+    // Let pictures load and formulas lay out before printing.
+    await Promise.all([...root.querySelectorAll("img")].map((img) => (img.complete ? null : new Promise((r) => ((img.onload = r), (img.onerror = r))))));
+    await new Promise((r) => setTimeout(r, 300));
     document.body.addClass("defter-printing");
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     const data = await remote.getCurrentWebContents().printToPDF({

@@ -126,3 +126,32 @@ test("page title prefers the first heading", () => {
   assert.equal(pageTitle("\n\n**Limit** kuralları"), "Limit kuralları");
   assert.equal(pageTitle(""), "");
 });
+
+test("page attributes (journal date, template, bookmark) round trip", () => {
+  const nb = emptyNotebook();
+  nb.pages = [
+    { text: "bugün", ink: [], date: "2026-11-10", mark: "#ffb45c" },
+    { text: "", ink: [], tpl: "cornell" },
+    { text: "düz", ink: [] },
+  ];
+  const md = serializeNotebook(nb);
+  assert.match(md, /<!-- defter:page date=2026-11-10 mark=#ffb45c -->/);
+  assert.deepEqual(parseNotebook(md), nb);
+  assert.equal(parseNotebook(md.replace("date=2026-11-10", "bogus=1")).pages[0].date, undefined);
+});
+
+test("objects (image, sticky note, formula) round trip and bad ones are dropped", () => {
+  const nb = emptyNotebook();
+  nb.pages = [
+    { text: "", ink: [] },
+    { text: "x", ink: [], obj: [
+      { k: "img", x: 10, y: 20, w: 300, h: 200, v: "attachments/soru 1.png" },
+      { k: "note", x: 400, y: 100, w: 180, h: 140, v: "Unutma: türev kuralı", c: "#fff27a" },
+      { k: "tex", x: 100, y: 500, w: 160, h: 50, v: "\\frac{a}{b}" },
+    ] },
+  ];
+  const back = roundTrip(nb);
+  assert.deepEqual(back, nb);
+  const md = serializeNotebook(nb).replace('"k":"tex"', '"k":"video"');
+  assert.equal(parseNotebook(md).pages[1].obj!.length, 2);
+});

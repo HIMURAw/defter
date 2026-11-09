@@ -34,10 +34,35 @@ export interface Stroke {
   s?: ShapeKind;
 }
 
+export type ObjectKind = "img" | "note" | "tex";
+
+/** Things placed on a page: a picture, a sticky note or a formula. */
+export interface PageObject {
+  k: ObjectKind;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** img: vault path of the image · note: its text · tex: LaTeX source. */
+  v: string;
+  /** note: paper colour. */
+  c?: string;
+}
+
 export interface Page {
   text: string;
   ink: Stroke[];
+  /** Placed objects (optional, absent on most pages). */
+  obj?: PageObject[];
+  /** Journal day, YYYY-MM-DD. */
+  date?: string;
+  /** Page template: cornell, qa, formula, cover. */
+  tpl?: string;
+  /** Bookmark tab colour. */
+  mark?: string;
 }
+
+const PAGE_ATTRS = ["date", "tpl", "mark"] as const;
 
 export interface Notebook {
   /** Frontmatter lines without the --- fences. Other keys (tags, aliases) are kept. */
@@ -88,7 +113,17 @@ function isStroke(s: unknown): s is Stroke {
   );
 }
 
-function parseInk(json: string): Stroke[][] {
+function isObject(o: unknown): o is PageObject {
+  if (!o || typeof o !== "object") return false;
+  const r = o as Record<string, unknown>;
+  return (
+    (r.k === "img" || r.k === "note" || r.k === "tex") &&
+    typeof r.v === "string" &&
+    ["x", "y", "w", "h"].every((key) => typeof r[key] === "number" && Number.isFinite(r[key]))
+  );
+}
+
+function parseInk(json: string): { ink: Stroke[][]; obj: PageObject[][] } {
   let data: unknown;
   try {
     data = JSON.parse(json);
@@ -97,7 +132,26 @@ function parseInk(json: string): Stroke[][] {
   }
   const pages = (data as { pages?: unknown })?.pages;
   if (!Array.isArray(pages)) throw new NotebookFormatError("The drawing block has no pages list.");
-  return pages.map((list) => (Array.isArray(list) ? list.filter(isStroke) : []));
+  const objects = (data as { objects?: unknown })?.objects;
+  return {
+    ink: pages.map((list) => (Array.isArray(list) ? list.filter(isStroke) : [])),
+    obj: Array.isArray(objects) ? objects.map((list) => (Array.isArray(list) ? list.filter(isObject) : [])) : [],
+  };
+}
+
+const MARKER_RE = /^<!-- defter:page((?: [a-z]+=[^\s>]+)*) -->[ \t]*$/gm;
+
+function parseAttrs(src: string): Partial<Page> {
+  const out: Partial<Page> = {};
+  for (const m of src.matchAll(/ ([a-z]+)=([^\s>]+)/g)) {
+    if ((PAGE_ATTRS as readonly string[]).includes(m[1])) (out as Record<string, string>)[m[1]] = m[2];
+  }
+  return out;
+}
+
+function marker(p: Page): string {
+  const attrs = PAGE_ATTRS.filter((a) => p[a] && /^[^\s>]+$/.test(p[a]!)).map((a) => ` ${a}=${p[a]}`).join("");
+  return `<!-- defter:page${attrs} -->`;
 }
 
 const escapeText = (t: string) => t.replace(/^<!-- defter:/gm, `<!-- defter${ESCAPE}:`);
@@ -109,19 +163,27 @@ export function parseNotebook(source: string): Notebook {
   let body = rawBody;
 
   let inkPages: Stroke[][] = [];
+  let objPages: PageObject[][] = [];
   const inkStart = body.lastIndexOf("\n" + INK_OPEN);
   const inkAtTop = body.startsWith(INK_OPEN) ? 0 : -1;
   const start = inkStart !== -1 ? inkStart + 1 : inkAtTop;
   if (start !== -1) {
     const close = body.indexOf("\n" + INK_CLOSE, start);
     if (close === -1) throw new NotebookFormatError("The drawing block is not closed.");
-    inkPages = parseInk(body.slice(start + INK_OPEN.length, close));
+    ({ ink: inkPages, obj: objPages } = parseInk(body.slice(start + INK_OPEN.length, close)));
     const tail = body.slice(close + 1 + INK_CLOSE.length);
     if (tail.trim()) throw new NotebookFormatError("Unexpected text after the drawing block.");
     body = body.slice(0, start);
   }
 
-  const chunks = body.split(/^<!-- defter:page -->[ \t]*$/m);
+  // split() with a capture group interleaves the marker attributes with the texts.
+  const parts = body.split(new RegExp(MARKER_RE.source, "m"));
+  const chunks = [parts[0]];
+  const attrs: Partial<Page>[] = [];
+  for (let i = 1; i < parts.length; i += 2) {
+    attrs.push(parseAttrs(parts[i] ?? ""));
+    chunks.push(parts[i + 1] ?? "");
+  }
   let preface = "";
   let texts: string[];
   if (chunks.length === 1) {
@@ -137,9 +199,13 @@ export function parseNotebook(source: string): Notebook {
     });
   }
 
-  const count = Math.max(texts.length, inkPages.length, 1);
+  const count = Math.max(texts.length, inkPages.length, objPages.length, 1);
   const pages: Page[] = [];
-  for (let i = 0; i < count; i++) pages.push({ text: texts[i] ?? "", ink: inkPages[i] ?? [] });
+  for (let i = 0; i < count; i++) {
+    const page: Page = { text: texts[i] ?? "", ink: inkPages[i] ?? [], ...(attrs[i] ?? {}) };
+    if (objPages[i]?.length) page.obj = objPages[i];
+    pages.push(page);
+  }
 
   let fm = frontmatter ?? "";
   if (!new RegExp(`^${FRONTMATTER_KEY}:`, "m").test(fm)) fm = fm ? `${FRONTMATTER_KEY}: notebook\n${fm}` : `${FRONTMATTER_KEY}: notebook`;
@@ -149,10 +215,13 @@ export function parseNotebook(source: string): Notebook {
 export function serializeNotebook(nb: Notebook): string {
   let out = `---\n${nb.frontmatter}\n---\n\n`;
   if (nb.preface) out += nb.preface + "\n\n";
-  for (const p of nb.pages) out += `${PAGE_MARKER}\n${escapeText(p.text)}\n\n`;
-  if (nb.pages.some((p) => p.ink.length)) {
+  for (const p of nb.pages) out += `${marker(p)}\n${escapeText(p.text)}\n\n`;
+  const hasObj = nb.pages.some((p) => p.obj?.length);
+  if (nb.pages.some((p) => p.ink.length) || hasObj) {
     const lines = nb.pages.map((p) => JSON.stringify(p.ink));
-    out += `${INK_OPEN}\n{"v":1,"pages":[\n${lines.join(",\n")}\n]}\n${INK_CLOSE}\n`;
+    let json = `{"v":1,"pages":[\n${lines.join(",\n")}\n]`;
+    if (hasObj) json += `,"objects":[\n${nb.pages.map((p) => JSON.stringify(p.obj ?? [])).join(",\n")}\n]`;
+    out += `${INK_OPEN}\n${json}}\n${INK_CLOSE}\n`;
   }
   return out;
 }

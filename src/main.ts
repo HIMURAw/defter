@@ -4,6 +4,7 @@ import { FRONTMATTER_KEY, emptyNotebook, fromLegacy, isNotebookText, serializeNo
 import { DEFAULT_SETTINGS, DefterSettingTab, type DefterSettings, type NotebookLook } from "./settings";
 import { SHELF_VIEW, ShelfView, type ShelfHost } from "./shelf";
 import { exportPdf } from "./pdf";
+import { NewNotebookModal } from "./new-notebook";
 
 const LEGACY_EXT = "defter";
 
@@ -38,9 +39,10 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
       name: "New notebook",
       callback: () => {
         const active = this.app.workspace.getActiveFile();
-        void this.createNotebook(active?.parent ?? this.app.vault.getRoot());
+        this.newNotebook(active?.parent ?? this.app.vault.getRoot());
       },
     });
+    this.addCommand({ id: "open-journal", name: "Open today's journal page", callback: () => this.openJournal() });
     this.addCommand({
       id: "open-as-notebook",
       name: "Open this note as a notebook",
@@ -61,7 +63,7 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
       this.app.workspace.on("file-menu", (menu, target, _source, leaf) => {
         if (target instanceof TFolder) {
           menu.addItem((item) =>
-            item.setTitle("New notebook").setIcon("notebook-pen").onClick(() => void this.createNotebook(target))
+            item.setTitle("New notebook").setIcon("notebook-pen").onClick(() => this.newNotebook(target))
           );
         } else if (target instanceof TFile && target.extension === "md" && leaf?.view instanceof MarkdownView) {
           menu.addItem((item) =>
@@ -107,7 +109,7 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
   }
 
   exportPdf(title: string, nb: Notebook, look: NotebookLook) {
-    return exportPdf(title, nb, look);
+    return exportPdf(this.app, title, nb, look);
   }
 
   notebookFiles(): TFile[] {
@@ -116,8 +118,18 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
       .filter((f) => this.app.metadataCache.getFileCache(f)?.frontmatter?.[FRONTMATTER_KEY] === "notebook");
   }
 
-  newNotebook(folder: TFolder) {
-    void this.createNotebook(folder);
+  newNotebook(folder: TFolder, journal = false) {
+    new NewNotebookModal(this.app, folder, this.settings, (path) => {
+      const leaf = this.app.workspace.getLeaf("tab");
+      void leaf.setViewState({ type: VIEW_TYPE, state: { file: path }, active: true });
+    }, journal).open();
+  }
+
+  /** Opens the journal on today's page; offers to create one if there is none. */
+  openJournal() {
+    const journal = this.notebookFiles().find((f) => this.app.metadataCache.getFileCache(f)?.frontmatter?.["defter-journal"] === true || this.app.metadataCache.getFileCache(f)?.frontmatter?.["defter-journal"] === "true");
+    if (journal) this.openNotebook(journal);
+    else this.newNotebook(this.app.workspace.getActiveFile()?.parent ?? this.app.vault.getRoot(), true);
   }
 
   openNotebook(file: TFile) {
