@@ -1,19 +1,120 @@
-import { ItemView, TFile, TFolder, debounce, moment, setIcon, type WorkspaceLeaf } from "obsidian";
+import { ItemView, Menu, Modal, Notice, Setting, TFile, TFolder, debounce, moment, normalizePath, setIcon, setTooltip, type App, type WorkspaceLeaf } from "obsidian";
 import { PAGE_MARKER } from "./format";
-import { defaultCover } from "./settings";
+import { COVERS, defaultCover } from "./settings";
 
 export const SHELF_VIEW = "defter-shelf";
 
 export interface ShelfHost {
+  app: App;
+  settings: { bookcases: string[]; caseOrder: string[]; bookOrder: Record<string, string[]> };
+  saveSettings(): Promise<void>;
   notebookFiles(): TFile[];
   openNotebook(file: TFile): void;
-  createNotebook(folder: TFolder): Promise<void>;
+  newNotebook(folder: TFolder): void;
 }
 
-/** Every notebook in the vault as a book on a shelf, grouped by folder. */
+const SLOT = 212; // height of one shelf row (tallest book + headroom)
+
+function hash(s: string) {
+  let h = 0;
+  for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h;
+}
+
+/** Asks for a single line of text. */
+class PromptModal extends Modal {
+  private title: string;
+  private value: string;
+  private done: (v: string) => void;
+  private extra?: (el: HTMLElement) => void;
+  constructor(app: App, title: string, value: string, done: (v: string) => void, extra?: (el: HTMLElement) => void) {
+    super(app);
+    this.title = title;
+    this.value = value;
+    this.done = done;
+    this.extra = extra;
+  }
+  onOpen() {
+    this.titleEl.setText(this.title);
+    let v = this.value;
+    const submit = () => {
+      if (!v.trim()) return;
+      this.close();
+      this.done(v.trim());
+    };
+    new Setting(this.contentEl).setName("Name").addText((t) => {
+      t.setValue(v).onChange((x) => (v = x));
+      t.inputEl.addEventListener("keydown", (e) => e.key === "Enter" && submit());
+      setTimeout(() => t.inputEl.select(), 0);
+    });
+    this.extra?.(this.contentEl);
+    new Setting(this.contentEl).addButton((b) => b.setButtonText("Save").setCta().onClick(submit));
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+class ConfirmModal extends Modal {
+  private text: string;
+  private action: string;
+  private done: () => void;
+  constructor(app: App, text: string, action: string, done: () => void) {
+    super(app);
+    this.text = text;
+    this.action = action;
+    this.done = done;
+  }
+  onOpen() {
+    this.titleEl.setText("Are you sure?");
+    this.contentEl.createEl("p", { text: this.text });
+    new Setting(this.contentEl)
+      .addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
+      .addButton((b) =>
+        b
+          .setButtonText(this.action)
+          .setWarning()
+          .onClick(() => {
+            this.close();
+            this.done();
+          })
+      );
+  }
+}
+
+class CoverModal extends Modal {
+  private file: TFile;
+  constructor(app: App, file: TFile) {
+    super(app);
+    this.file = file;
+  }
+  onOpen() {
+    this.titleEl.setText(`Cover of “${this.file.basename}”`);
+    const row = this.contentEl.createDiv("defter-set-row");
+    for (const c of COVERS) {
+      const b = row.createEl("button", { cls: "defter-swatch defter-swatch-lg defter-swatch-cover", attr: { "aria-label": "Cover colour" } });
+      b.style.setProperty("--swatch", c);
+      b.onclick = async () => {
+        await this.app.fileManager.processFrontMatter(this.file, (fm) => {
+          fm["defter-cover"] = c;
+        });
+        this.close();
+      };
+    }
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/**
+ * The library: each bookcase is a folder, each notebook a book standing on a
+ * wooden shelf. Dragging a book to another bookcase moves the file.
+ */
 export class ShelfView extends ItemView {
   private host: ShelfHost;
-  private refresh = debounce(() => void this.render(), 300, true);
+  private refresh = debounce(() => void this.render(), 250, true);
+  private dragging: TFile | null = null;
 
   constructor(leaf: WorkspaceLeaf, host: ShelfHost) {
     super(leaf);
@@ -24,14 +125,14 @@ export class ShelfView extends ItemView {
     return SHELF_VIEW;
   }
   getDisplayText() {
-    return "Notebooks";
+    return "Library";
   }
   getIcon() {
     return "library";
   }
 
   async onOpen() {
-    this.contentEl.addClass("defter-shelf");
+    this.contentEl.addClass("defter-library");
     this.registerEvent(this.app.vault.on("create", () => this.refresh()));
     this.registerEvent(this.app.vault.on("delete", () => this.refresh()));
     this.registerEvent(this.app.vault.on("rename", () => this.refresh()));
@@ -39,61 +140,285 @@ export class ShelfView extends ItemView {
     await this.render();
   }
 
+  private folder(path: string): TFolder | null {
+    const f = path === "/" ? this.app.vault.getRoot() : this.app.vault.getAbstractFileByPath(path);
+    return f instanceof TFolder ? f : null;
+  }
+
+  /** Bookcases: folders holding notebooks plus empty ones the user created. */
+  private bookcases(files: TFile[]): TFolder[] {
+    const s = this.host.settings;
+    const paths = new Set<string>(s.bookcases.filter((p) => this.folder(p)));
+    for (const f of files) paths.add(f.parent?.path ?? "/");
+    const collator = new Intl.Collator("tr", { numeric: true });
+    const order = (p: string) => {
+      const i = s.caseOrder.indexOf(p);
+      return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+    };
+    return [...paths]
+      .sort((a, b) => order(a) - order(b) || collator.compare(a, b))
+      .map((p) => this.folder(p)!)
+      .filter(Boolean);
+  }
+
+  private orderedBooks(folder: TFolder, files: TFile[]): TFile[] {
+    const saved = this.host.settings.bookOrder[folder.path] ?? [];
+    const collator = new Intl.Collator("tr", { numeric: true });
+    const rank = (f: TFile) => {
+      const i = saved.indexOf(f.name);
+      return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+    };
+    return files
+      .filter((f) => (f.parent?.path ?? "/") === folder.path)
+      .sort((a, b) => rank(a) - rank(b) || collator.compare(a.basename, b.basename));
+  }
+
   private async render() {
     const root = this.contentEl;
+    const scroll = root.scrollTop;
     const files = this.host.notebookFiles();
     const pages = new Map<TFile, number>();
-    await Promise.all(
-      files.map(async (f) => pages.set(f, (await this.app.vault.cachedRead(f)).split(PAGE_MARKER).length - 1 || 1))
-    );
+    await Promise.all(files.map(async (f) => pages.set(f, (await this.app.vault.cachedRead(f)).split(PAGE_MARKER).length - 1 || 1)));
 
     root.empty();
-    const head = root.createDiv("defter-shelf-head");
-    head.createEl("h2", { text: "Notebooks" });
-    head.createSpan({ cls: "defter-shelf-count", text: files.length === 1 ? "1 notebook" : `${files.length} notebooks` });
+    const head = root.createDiv("defter-lib-head");
+    head.createEl("h2", { text: "Library" });
+    head.createSpan({ cls: "defter-lib-count", text: files.length === 1 ? "1 notebook" : `${files.length} notebooks` });
+    const add = head.createEl("button", { cls: "mod-cta", text: "New bookcase" });
+    add.onclick = () => this.newBookcase();
 
-    if (!files.length) {
-      const empty = root.createDiv("defter-shelf-empty");
-      empty.createEl("p", { text: "No notebooks yet. Start one here, or right-click any folder → New notebook." });
-      const b = empty.createEl("button", { cls: "mod-cta", text: "New notebook" });
-      b.onclick = () => void this.host.createNotebook(this.app.vault.getRoot());
+    const cases = this.bookcases(files);
+    if (!cases.length) {
+      root.createDiv({ cls: "defter-lib-empty", text: "No notebooks yet. Create a bookcase, then add notebooks to it." });
       return;
     }
+    cases.forEach((folder, ci) => this.renderCase(root, folder, this.orderedBooks(folder, files), pages, ci, cases));
+    root.scrollTop = scroll;
+  }
 
-    const groups = new Map<TFolder, TFile[]>();
-    for (const f of files) {
-      const parent = f.parent ?? this.app.vault.getRoot();
-      groups.set(parent, [...(groups.get(parent) ?? []), f]);
-    }
-    const collator = new Intl.Collator("tr", { numeric: true });
-    const sorted = [...groups.entries()].sort(([a], [b]) => collator.compare(a.path, b.path));
+  private renderCase(root: HTMLElement, folder: TFolder, books: TFile[], pages: Map<TFile, number>, index: number, all: TFolder[]) {
+    const cabinet = root.createDiv("defter-case");
+    const top = cabinet.createDiv("defter-case-top");
+    const name = top.createDiv("defter-case-name");
+    name.createSpan({ text: folder.isRoot() ? "Vault" : folder.name });
+    if (folder.parent && !folder.parent.isRoot()) name.createSpan({ cls: "defter-case-path", text: folder.parent.path });
+    const more = top.createEl("button", { cls: "defter-case-more clickable-icon", attr: { "aria-label": "Bookcase options" } });
+    setIcon(more, "more-horizontal");
+    more.onclick = (e) => this.caseMenu(e, folder, books.length, index, all);
 
-    for (const [folder, list] of sorted) {
-      const group = root.createDiv("defter-shelf-group");
-      const title = group.createDiv("defter-shelf-folder");
-      title.createSpan({ text: folder.isRoot() ? "Vault" : folder.name });
-      if (!folder.isRoot() && folder.parent && !folder.parent.isRoot()) {
-        title.createSpan({ cls: "defter-shelf-path", text: folder.parent.path });
+    const inner = cabinet.createDiv("defter-case-inner");
+    inner.style.setProperty("--slot", SLOT + "px");
+    for (const f of books) this.renderBook(inner, f, pages.get(f) ?? 1, folder);
+
+    const plus = inner.createEl("button", { cls: "defter-spine defter-spine-new" });
+    setTooltip(plus, "New notebook here");
+    setIcon(plus, "plus");
+    plus.onclick = () => this.host.newNotebook(folder);
+
+    // Dropping on the shelf (not on a book) puts the book at the end.
+    inner.addEventListener("dragover", (e) => {
+      if (!this.dragging) return;
+      e.preventDefault();
+      inner.addClass("is-drop");
+    });
+    inner.addEventListener("dragleave", (e) => {
+      if (!inner.contains(e.relatedTarget as Node)) inner.removeClass("is-drop");
+    });
+    inner.addEventListener("drop", (e) => {
+      e.preventDefault();
+      inner.removeClass("is-drop");
+      if (this.dragging) void this.place(this.dragging, folder, null, false);
+    });
+  }
+
+  private renderBook(inner: HTMLElement, f: TFile, n: number, folder: TFolder) {
+    const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
+    const cover = typeof fm?.["defter-cover"] === "string" ? fm["defter-cover"] : defaultCover(f.basename);
+    const h = hash(f.basename);
+    const book = inner.createEl("button", { cls: "defter-spine" });
+    book.style.setProperty("--cover", cover);
+    book.style.setProperty("--w", Math.min(64, 30 + Math.round(Math.sqrt(n) * 6)) + "px");
+    book.style.setProperty("--h", 150 + (h % 5) * 9 + "px");
+    book.toggleClass("has-bands", h % 3 !== 0);
+    book.createDiv({ cls: "defter-spine-title", text: f.basename });
+    setTooltip(book, `${f.basename} · ${n} ${n === 1 ? "page" : "pages"} · ${moment(f.stat.mtime).fromNow()}`, { placement: "top" });
+    book.draggable = true;
+    book.onclick = () => this.host.openNotebook(f);
+    book.oncontextmenu = (e) => {
+      e.preventDefault();
+      this.bookMenu(e, f, folder);
+    };
+    book.addEventListener("dragstart", (e) => {
+      this.dragging = f;
+      book.addClass("is-dragging");
+      e.dataTransfer?.setData("text/plain", f.path);
+    });
+    book.addEventListener("dragend", () => {
+      this.dragging = null;
+      book.removeClass("is-dragging");
+    });
+    book.addEventListener("dragover", (e) => {
+      if (!this.dragging || this.dragging === f) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const r = book.getBoundingClientRect();
+      const after = e.clientX > r.left + r.width / 2;
+      book.toggleClass("drop-before", !after);
+      book.toggleClass("drop-after", after);
+    });
+    book.addEventListener("dragleave", () => book.removeClass("drop-before", "drop-after"));
+    book.addEventListener("drop", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const after = book.hasClass("drop-after");
+      book.removeClass("drop-before", "drop-after");
+      inner.removeClass("is-drop");
+      if (this.dragging && this.dragging !== f) void this.place(this.dragging, folder, f, after);
+    });
+  }
+
+  /** Puts a book into a bookcase, next to another book; moves the file if needed. */
+  private async place(file: TFile, folder: TFolder, near: TFile | null, after: boolean) {
+    let target = file;
+    if ((file.parent?.path ?? "/") !== folder.path) {
+      const dest = normalizePath(`${folder.isRoot() ? "" : folder.path + "/"}${file.name}`);
+      if (this.app.vault.getAbstractFileByPath(dest)) {
+        new Notice(`“${folder.name}” already has a notebook named “${file.basename}”.`);
+        return;
       }
-      const row = group.createDiv("defter-shelf-row");
-      for (const f of list.sort((a, b) => collator.compare(a.basename, b.basename))) {
-        const fm = this.app.metadataCache.getFileCache(f)?.frontmatter;
-        const cover = typeof fm?.["defter-cover"] === "string" ? fm["defter-cover"] : defaultCover(f.basename);
-        const book = row.createEl("button", { cls: "defter-book", attr: { "aria-label": `Open ${f.basename}` } });
-        book.style.setProperty("--cover", cover);
-        book.createDiv("defter-book-spine");
-        const label = book.createDiv("defter-book-label");
-        label.createDiv({ cls: "defter-book-title", text: f.basename });
-        const n = pages.get(f) ?? 1;
-        const meta = book.createDiv("defter-book-meta");
-        meta.createDiv({ text: `${n} ${n === 1 ? "page" : "pages"}` });
-        meta.createDiv({ text: moment(f.stat.mtime).fromNow() });
-        book.onclick = () => this.host.openNotebook(f);
-      }
-      const add = row.createEl("button", { cls: "defter-book defter-book-new", attr: { "aria-label": `New notebook in ${folder.isRoot() ? "vault" : folder.name}` } });
-      setIcon(add.createDiv("defter-book-plus"), "plus");
-      add.createDiv({ cls: "defter-book-meta", text: "New notebook" });
-      add.onclick = () => void this.host.createNotebook(folder);
+      await this.app.fileManager.renameFile(file, dest);
+      target = this.app.vault.getAbstractFileByPath(dest) as TFile;
     }
+    const files = this.host.notebookFiles();
+    const names = this.orderedBooks(folder, files).map((f) => f.name).filter((n) => n !== target.name);
+    const at = near ? names.indexOf(near.name) + (after ? 1 : 0) : names.length;
+    names.splice(at < 0 ? names.length : at, 0, target.name);
+    this.host.settings.bookOrder[folder.path] = names;
+    await this.host.saveSettings();
+    this.refresh();
+  }
+
+  private bookMenu(e: MouseEvent, f: TFile, folder: TFolder) {
+    const menu = new Menu();
+    menu.addItem((i) => i.setTitle("Open").setIcon("book-open").onClick(() => this.host.openNotebook(f)));
+    menu.addItem((i) =>
+      i.setTitle("Rename").setIcon("pencil").onClick(() =>
+        new PromptModal(this.app, "Rename notebook", f.basename, async (v) => {
+          const dest = normalizePath(`${f.parent && !f.parent.isRoot() ? f.parent.path + "/" : ""}${v}.md`);
+          if (this.app.vault.getAbstractFileByPath(dest)) return new Notice("A note with that name already exists.");
+          const order = this.host.settings.bookOrder[folder.path];
+          const idx = order?.indexOf(f.name) ?? -1;
+          await this.app.fileManager.renameFile(f, dest);
+          if (order && idx !== -1) order[idx] = `${v}.md`;
+          await this.host.saveSettings();
+        }).open()
+      )
+    );
+    menu.addItem((i) => i.setTitle("Cover colour").setIcon("palette").onClick(() => new CoverModal(this.app, f).open()));
+    menu.addSeparator();
+    for (const target of this.bookcases(this.host.notebookFiles())) {
+      if (target === folder) continue;
+      menu.addItem((i) =>
+        i
+          .setTitle(`Move to ${target.isRoot() ? "Vault" : target.name}`)
+          .setIcon("folder-input")
+          .setSection("move")
+          .onClick(() => void this.place(f, target, null, false))
+      );
+    }
+    menu.addSeparator();
+    menu.addItem((i) =>
+      i
+        .setTitle("Delete notebook")
+        .setIcon("trash-2")
+        .setWarning(true)
+        .onClick(() =>
+          new ConfirmModal(this.app, `“${f.basename}” will be moved to the trash.`, "Delete", () => void this.app.fileManager.trashFile(f)).open()
+        )
+    );
+    menu.showAtMouseEvent(e);
+  }
+
+  private caseMenu(e: MouseEvent, folder: TFolder, count: number, index: number, all: TFolder[]) {
+    const s = this.host.settings;
+    const menu = new Menu();
+    const move = async (dir: number) => {
+      const order = all.map((f) => f.path);
+      const j = index + dir;
+      if (j < 0 || j >= order.length) return;
+      [order[index], order[j]] = [order[j], order[index]];
+      s.caseOrder = order;
+      await this.host.saveSettings();
+      this.refresh();
+    };
+    menu.addItem((i) => i.setTitle("New notebook here").setIcon("plus").onClick(() => this.host.newNotebook(folder)));
+    if (!folder.isRoot()) {
+      menu.addItem((i) =>
+        i.setTitle("Rename bookcase").setIcon("pencil").onClick(() =>
+          new PromptModal(this.app, "Rename bookcase", folder.name, async (v) => {
+            const dest = normalizePath(`${folder.parent && !folder.parent.isRoot() ? folder.parent.path + "/" : ""}${v}`);
+            if (this.app.vault.getAbstractFileByPath(dest)) return new Notice("A folder with that name already exists.");
+            const old = folder.path;
+            await this.app.fileManager.renameFile(folder, dest);
+            const swap = (p: string) => (p === old ? dest : p);
+            s.bookcases = s.bookcases.map(swap);
+            s.caseOrder = s.caseOrder.map(swap);
+            if (s.bookOrder[old]) {
+              s.bookOrder[dest] = s.bookOrder[old];
+              delete s.bookOrder[old];
+            }
+            await this.host.saveSettings();
+          }).open()
+        )
+      );
+    }
+    menu.addItem((i) => i.setTitle("Move up").setIcon("arrow-up").setDisabled(index === 0).onClick(() => void move(-1)));
+    menu.addItem((i) => i.setTitle("Move down").setIcon("arrow-down").setDisabled(index === all.length - 1).onClick(() => void move(1)));
+    if (count === 0 && !folder.isRoot()) {
+      menu.addSeparator();
+      menu.addItem((i) =>
+        i
+          .setTitle("Remove bookcase")
+          .setIcon("trash-2")
+          .setWarning(true)
+          .onClick(async () => {
+            s.bookcases = s.bookcases.filter((p) => p !== folder.path);
+            s.caseOrder = s.caseOrder.filter((p) => p !== folder.path);
+            await this.host.saveSettings();
+            // The folder itself is only deleted when it is completely empty.
+            if (!folder.children.length) await this.app.fileManager.trashFile(folder);
+            this.refresh();
+          })
+      );
+    }
+    menu.showAtMouseEvent(e);
+  }
+
+  private newBookcase() {
+    const folders = this.app.vault.getAllLoadedFiles().filter((f): f is TFolder => f instanceof TFolder && !f.path.startsWith("."));
+    let parent = this.host.notebookFiles()[0]?.parent?.parent?.path ?? "/";
+    new PromptModal(
+      this.app,
+      "New bookcase",
+      "",
+      async (name) => {
+        const base = parent === "/" ? "" : parent + "/";
+        const path = normalizePath(base + name);
+        if (!this.app.vault.getAbstractFileByPath(path)) await this.app.vault.createFolder(path);
+        const s = this.host.settings;
+        if (!s.bookcases.includes(path)) s.bookcases.push(path);
+        await this.host.saveSettings();
+        this.refresh();
+      },
+      (el) =>
+        new Setting(el)
+          .setName("Inside folder")
+          .setDesc("The bookcase is a folder; its notebooks are the notes in it.")
+          .addDropdown((d) => {
+            d.addOption("/", "Vault (top level)");
+            for (const f of folders) if (!f.isRoot()) d.addOption(f.path, f.path);
+            d.setValue(parent).onChange((v) => (parent = v));
+          })
+    ).open();
   }
 }

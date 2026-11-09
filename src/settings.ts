@@ -75,6 +75,11 @@ export interface DefterSettings {
   ink: string;
   anim: AnimSpeed;
   lastPage: Record<string, number>;
+  /** Bookcase folders the user created, kept even while empty. */
+  bookcases: string[];
+  caseOrder: string[];
+  /** Book order per bookcase folder: file names. */
+  bookOrder: Record<string, string[]>;
 }
 
 export const DEFAULT_SETTINGS: DefterSettings = {
@@ -85,6 +90,9 @@ export const DEFAULT_SETTINGS: DefterSettings = {
   ink: INKS[0].id,
   anim: "normal",
   lastPage: {},
+  bookcases: [],
+  caseOrder: [],
+  bookOrder: {},
 };
 
 export interface NotebookLook {

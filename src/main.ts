@@ -8,7 +8,7 @@ import { exportPdf } from "./pdf";
 const LEGACY_EXT = "defter";
 
 export default class DefterPlugin extends Plugin implements DefterHost, ShelfHost {
-  settings: DefterSettings = { ...DEFAULT_SETTINGS, lastPage: {} };
+  settings: DefterSettings = { ...DEFAULT_SETTINGS, lastPage: {}, bookcases: [], caseOrder: [], bookOrder: {} };
   /** Leaves where the user chose "Open as Markdown", with the file they chose it for. */
   private markdownLeaves = new WeakMap<WorkspaceLeaf, string>();
   private switching = new WeakSet<WorkspaceLeaf>();
@@ -17,6 +17,9 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
   async onload() {
     this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData()) };
     this.settings.lastPage ??= {};
+    this.settings.bookcases ??= [];
+    this.settings.caseOrder ??= [];
+    this.settings.bookOrder ??= {};
     this.addSettingTab(new DefterSettingTab(this.app, this));
 
     this.registerView(VIEW_TYPE, (leaf) => new DefterView(leaf, this));
@@ -27,9 +30,9 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
       this.reportLegacy();
     });
 
-    this.addRibbonIcon("library", "Open notebook shelf", () => void this.openShelf());
+    this.addRibbonIcon("library", "Open library", () => void this.openShelf());
 
-    this.addCommand({ id: "open-shelf", name: "Open notebook shelf", callback: () => void this.openShelf() });
+    this.addCommand({ id: "open-shelf", name: "Open library", callback: () => void this.openShelf() });
     this.addCommand({
       id: "new-notebook",
       name: "New notebook",
@@ -111,6 +114,10 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
     return this.app.vault
       .getMarkdownFiles()
       .filter((f) => this.app.metadataCache.getFileCache(f)?.frontmatter?.[FRONTMATTER_KEY] === "notebook");
+  }
+
+  newNotebook(folder: TFolder) {
+    void this.createNotebook(folder);
   }
 
   openNotebook(file: TFile) {
