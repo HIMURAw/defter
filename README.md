@@ -2,21 +2,27 @@
 
 Paper notebooks for [Obsidian](https://obsidian.md). Type with your keyboard and the words appear in animated handwriting on ruled paper. Draw, underline and highlight with the mouse. Every notebook is a plain Markdown file, so search, links and Git keep working, and your text stays readable even without the plugin.
 
-> Status: early development (v0.1). Desktop only.
+> Status: early development (v0.2). Desktop only.
 
 ## Features
 
-- Ruled pages with a margin line; text flows to the next page when one is full.
-- Handwriting font (Caveat) with a pen-stroke reveal animation for each letter.
-- Pen (4 colours, 3 widths), highlighter that stays under the text, stroke eraser, undo/redo.
-- Notebooks are `.md` files: page text is plain Markdown, drawings live in a hidden block at the end.
+- **Handwriting as you type.** Four handwriting fonts (Caveat, Kalam, Patrick Hand, Shantell Sans) with full Turkish and Latin Extended support. Each letter is revealed like a pen stroke; speed is adjustable or off.
+- **Real paper.** Ruled, grid, dotted or blank pages in cream, white or dark. Text always sits on the lines, whatever font or size you pick. When a page is full, writing continues on the next one.
+- **Pencil case.** A floating toolbar at the bottom: pen (5 inks, 3 widths), highlighter that stays under the text, line / arrow / box shapes (hold Shift for straight lines and squares), stroke eraser, undo and redo.
+- **Study marks without leaving the keyboard.** `# heading`, `**bold**`, `==highlight==`, `- list` and `[[links]]` are drawn in ink on the page; Ctrl+click opens a link.
+- **Find anything.** Page list with titles, search inside the notebook (Ctrl+F), move and remove pages.
+- **Notebook shelf.** Every notebook in the vault as a coloured book, grouped by folder; opens where you left off.
+- **PDF export** of the whole notebook, exactly as it looks.
+- **Plain Markdown files.** Page text is ordinary Markdown, so Obsidian search, backlinks and Git keep working, and nothing is locked in.
 
 ## Use
 
-- Right-click a folder → **New notebook**, or run **Defter: New notebook**.
-- Tools: `Alt+1` write · `Alt+2` pen · `Alt+3` highlighter · `Alt+4` eraser · `Esc` back to writing.
-- Pages: `Page Up` / `Page Down`, or the arrows in the toolbar.
-- **Open as Markdown** (toolbar icon) shows the raw file; **Open as notebook** from the file menu switches back.
+- Open the shelf from the ribbon (library icon) or run **Defter: Open notebook shelf**.
+- New notebook: the **+** book on the shelf, right-click a folder → **New notebook**, or **Defter: New notebook**.
+- Tools: `Alt+1` write · `Alt+2` pen · `Alt+3` highlighter · `Alt+4` eraser · `Alt+5` shapes · `Esc` back to writing.
+- Pages: `Page Up` / `Page Down`, the arrows in the pencil case, or the page list in the header.
+- Notebook settings (paper, tone, handwriting, size, ink, cover): the sliders icon in the header. Defaults: **Settings → Defter**.
+- The `⋯` menu has PDF export, add/remove page and **Open as Markdown**.
 
 ## File format
 
@@ -39,7 +45,7 @@ Text of page two.
 -->
 ```
 
-Any note becomes a notebook by adding `defter-plugin: notebook` to its frontmatter.
+Any note becomes a notebook by adding `defter-plugin: notebook` to its frontmatter. Per-notebook look is stored as `defter-paper`, `defter-tone`, `defter-font`, `defter-size`, `defter-ink` and `defter-cover` properties. Shapes are strokes with an `s` field (`line`, `arrow`, `rect`) and two points.
 
 ## Development
 
@@ -52,4 +58,4 @@ DEFTER_VAULT=/path/to/vault npm run deploy
 
 ## License
 
-MIT. The bundled Caveat font is under the SIL Open Font License 1.1 (`fonts/OFL-Caveat.txt`).
+MIT. The bundled fonts (Caveat, Kalam, Patrick Hand, Shantell Sans) are under the SIL Open Font License 1.1 (`fonts/OFL-*.txt`).

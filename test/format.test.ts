@@ -93,3 +93,36 @@ test("legacy .defter JSON converts", () => {
   assert.deepEqual(roundTrip(nb), nb);
   assert.throws(() => fromLegacy("{nope"), NotebookFormatError);
 });
+
+import { getProp, setProp, pageTitle } from "../src/format.ts";
+
+test("notebook settings are read and written in frontmatter", () => {
+  let fm = "defter-plugin: notebook\ntags: [tyt]";
+  assert.equal(getProp(fm, "defter-paper"), null);
+  fm = setProp(fm, "defter-paper", "grid");
+  fm = setProp(fm, "defter-cover", "#c0392b");
+  assert.equal(getProp(fm, "defter-paper"), "grid");
+  assert.equal(getProp(fm, "defter-cover"), "#c0392b");
+  assert.match(fm, /defter-cover: "#c0392b"/, "# must be quoted or YAML reads a comment");
+  fm = setProp(fm, "defter-paper", "dots");
+  assert.equal(fm.match(/defter-paper/g)!.length, 1);
+  fm = setProp(fm, "defter-paper", null);
+  assert.equal(getProp(fm, "defter-paper"), null);
+  assert.match(fm, /tags: \[tyt\]/);
+  const nb = parseNotebook(`---\n${fm}\n---\n\n<!-- defter:page -->\nx\n\n`);
+  assert.equal(getProp(nb.frontmatter, "defter-cover"), "#c0392b");
+});
+
+test("shapes round trip, broken shapes are dropped", () => {
+  const nb = emptyNotebook();
+  nb.pages = [{ text: "", ink: [{ t: "pen", c: "#000", w: 2, p: [1, 2, 3, 4], s: "arrow" }] }];
+  assert.deepEqual(roundTrip(nb), nb);
+  const bad = '---\ndefter-plugin: notebook\n---\n\n<!-- defter:page -->\n\n\n<!-- defter:ink\n{"v":1,"pages":[\n[{"t":"pen","c":"#000","w":2,"p":[1,2,3,4,5,6],"s":"rect"},{"t":"pen","c":"#000","w":2,"p":[1,2,3,4],"s":"star"}]\n]}\n-->\n';
+  assert.equal(parseNotebook(bad).pages[0].ink.length, 0);
+});
+
+test("page title prefers the first heading", () => {
+  assert.equal(pageTitle("\n  intro\n# Türev\nx"), "Türev");
+  assert.equal(pageTitle("\n\n**Limit** kuralları"), "Limit kuralları");
+  assert.equal(pageTitle(""), "");
+});

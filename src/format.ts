@@ -22,12 +22,16 @@ const INK_CLOSE = "-->";
 const ESCAPE = "​";
 
 export type StrokeKind = "pen" | "hl";
+export type ShapeKind = "line" | "arrow" | "rect";
+const SHAPES: ShapeKind[] = ["line", "arrow", "rect"];
 
 export interface Stroke {
   t: StrokeKind;
   c: string;
   w: number;
+  /** Freehand: x,y pairs. Shape: start and end point (4 numbers). */
   p: number[];
+  s?: ShapeKind;
 }
 
 export interface Page {
@@ -72,6 +76,7 @@ export function isNotebookText(md: string): boolean {
 function isStroke(s: unknown): s is Stroke {
   if (!s || typeof s !== "object") return false;
   const o = s as Record<string, unknown>;
+  if (o.s !== undefined && !(SHAPES.includes(o.s as ShapeKind) && Array.isArray(o.p) && o.p.length === 4)) return false;
   return (
     (o.t === "pen" || o.t === "hl") &&
     typeof o.c === "string" &&
@@ -150,6 +155,35 @@ export function serializeNotebook(nb: Notebook): string {
     out += `${INK_OPEN}\n{"v":1,"pages":[\n${lines.join(",\n")}\n]}\n${INK_CLOSE}\n`;
   }
   return out;
+}
+
+// Simple `key: value` frontmatter properties. Only single-line scalar values are
+// handled; every other line is left exactly as it was.
+function propRegex(key: string) {
+  return new RegExp(`^${key.replace(/[-]/g, "\\-")}:[ \\t]*(.*)$`, "m");
+}
+
+export function getProp(frontmatter: string, key: string): string | null {
+  const m = propRegex(key).exec(frontmatter);
+  if (!m) return null;
+  const v = m[1].trim();
+  return v.replace(/^(["'])(.*)\1$/, "$2") || null;
+}
+
+export function setProp(frontmatter: string, key: string, value: string | null): string {
+  const re = propRegex(key);
+  if (value === null) return frontmatter.replace(new RegExp(re.source + "\\n?", "m"), "").replace(/\n$/, "");
+  const safe = /^[\w#.\- ]*$/.test(value) && !value.startsWith("#") ? value : JSON.stringify(value);
+  const line = `${key}: ${safe}`;
+  if (re.test(frontmatter)) return frontmatter.replace(re, line);
+  return frontmatter ? `${frontmatter}\n${line}` : line;
+}
+
+/** Text of the page shown in lists: first heading or first non-empty line. */
+export function pageTitle(text: string): string {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const heading = lines.find((l) => /^#{1,3} /.test(l));
+  return (heading ?? lines[0] ?? "").replace(/^#{1,3} /, "").replace(/\*\*|==|\[\[|\]\]/g, "");
 }
 
 /** Converts the JSON prototype format (.defter files) to a notebook. */

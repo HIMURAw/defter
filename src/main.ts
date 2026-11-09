@@ -1,23 +1,35 @@
-import { MarkdownView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, normalizePath, type ViewState } from "obsidian";
+import { MarkdownView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, debounce, normalizePath, type ViewState } from "obsidian";
 import { DefterView, VIEW_TYPE, type DefterHost } from "./view";
-import { FRONTMATTER_KEY, emptyNotebook, fromLegacy, isNotebookText, serializeNotebook } from "./format";
+import { FRONTMATTER_KEY, emptyNotebook, fromLegacy, isNotebookText, serializeNotebook, type Notebook } from "./format";
+import { DEFAULT_SETTINGS, DefterSettingTab, type DefterSettings, type NotebookLook } from "./settings";
+import { SHELF_VIEW, ShelfView, type ShelfHost } from "./shelf";
+import { exportPdf } from "./pdf";
 
 const LEGACY_EXT = "defter";
 
-export default class DefterPlugin extends Plugin implements DefterHost {
+export default class DefterPlugin extends Plugin implements DefterHost, ShelfHost {
+  settings: DefterSettings = { ...DEFAULT_SETTINGS, lastPage: {} };
   /** Leaves where the user chose "Open as Markdown", with the file they chose it for. */
   private markdownLeaves = new WeakMap<WorkspaceLeaf, string>();
   private switching = new WeakSet<WorkspaceLeaf>();
+  private saveSoon = debounce(() => void this.saveSettings(), 1500, true);
 
   async onload() {
-    this.registerView(VIEW_TYPE, (leaf) => new DefterView(leaf, this));
+    this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData()) };
+    this.settings.lastPage ??= {};
+    this.addSettingTab(new DefterSettingTab(this.app, this));
 
+    this.registerView(VIEW_TYPE, (leaf) => new DefterView(leaf, this));
+    this.registerView(SHELF_VIEW, (leaf) => new ShelfView(leaf, this));
     this.interceptOpen();
     this.app.workspace.onLayoutReady(() => {
       void this.switchLeaves();
       this.reportLegacy();
     });
 
+    this.addRibbonIcon("library", "Open notebook shelf", () => void this.openShelf());
+
+    this.addCommand({ id: "open-shelf", name: "Open notebook shelf", callback: () => void this.openShelf() });
     this.addCommand({
       id: "new-notebook",
       name: "New notebook",
@@ -26,7 +38,6 @@ export default class DefterPlugin extends Plugin implements DefterHost {
         void this.createNotebook(active?.parent ?? this.app.vault.getRoot());
       },
     });
-
     this.addCommand({
       id: "open-as-notebook",
       name: "Open this note as a notebook",
@@ -37,7 +48,6 @@ export default class DefterPlugin extends Plugin implements DefterHost {
         return true;
       },
     });
-
     this.addCommand({
       id: "convert-old-notebooks",
       name: "Convert old .defter notebooks to Markdown",
@@ -57,14 +67,64 @@ export default class DefterPlugin extends Plugin implements DefterHost {
         }
       })
     );
+
+    // Keep "last page" entries attached to the right file.
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        const n = this.settings.lastPage[oldPath];
+        if (n === undefined) return;
+        delete this.settings.lastPage[oldPath];
+        this.settings.lastPage[file.path] = n;
+        this.saveSoon();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        if (file.path in this.settings.lastPage) {
+          delete this.settings.lastPage[file.path];
+          this.saveSoon();
+        }
+      })
+    );
   }
 
-  private async isNotebook(file: TFile): Promise<boolean> {
-    if (file.extension !== "md") return false;
-    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-    if (fm && FRONTMATTER_KEY in fm) return fm[FRONTMATTER_KEY] === "notebook";
-    // Right after a file is created the metadata cache may not know it yet.
-    return isNotebookText(await this.app.vault.cachedRead(file));
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  refreshViews() {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) (leaf.view as DefterView).applyLook();
+  }
+
+  rememberPage(path: string, page: number) {
+    if (this.settings.lastPage[path] === page) return;
+    if (page === 0) delete this.settings.lastPage[path];
+    else this.settings.lastPage[path] = page;
+    this.saveSoon();
+  }
+
+  exportPdf(title: string, nb: Notebook, look: NotebookLook) {
+    return exportPdf(title, nb, look);
+  }
+
+  notebookFiles(): TFile[] {
+    return this.app.vault
+      .getMarkdownFiles()
+      .filter((f) => this.app.metadataCache.getFileCache(f)?.frontmatter?.[FRONTMATTER_KEY] === "notebook");
+  }
+
+  openNotebook(file: TFile) {
+    const leaf = this.app.workspace.getLeaf("tab");
+    void leaf.setViewState({ type: VIEW_TYPE, state: { file: file.path }, active: true });
+  }
+
+  async openShelf() {
+    const existing = this.app.workspace.getLeavesOfType(SHELF_VIEW)[0];
+    if (existing) {
+      await this.app.workspace.revealLeaf(existing);
+      return;
+    }
+    await this.app.workspace.getLeaf("tab").setViewState({ type: SHELF_VIEW, active: true });
   }
 
   // A notebook opened as Markdown is redirected to the notebook view before the
@@ -95,14 +155,20 @@ export default class DefterPlugin extends Plugin implements DefterHost {
     });
   }
 
+  private async isNotebook(file: TFile): Promise<boolean> {
+    if (file.extension !== "md") return false;
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (fm && FRONTMATTER_KEY in fm) return fm[FRONTMATTER_KEY] === "notebook";
+    // Right after a file is created the metadata cache may not know it yet.
+    return isNotebookText(await this.app.vault.cachedRead(file));
+  }
+
   /** Leaves restored from the saved layout that show a notebook as Markdown. */
   private async switchLeaves() {
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
       const file = (leaf.view as MarkdownView).file;
       if (!file || this.switching.has(leaf)) continue;
-      const chosen = this.markdownLeaves.get(leaf);
-      if (chosen === file.path) continue;
-      if (chosen) this.markdownLeaves.delete(leaf);
+      if (this.markdownLeaves.get(leaf) === file.path) continue;
       if (!(await this.isNotebook(file))) continue;
       await this.setType(leaf, VIEW_TYPE);
     }
@@ -111,8 +177,7 @@ export default class DefterPlugin extends Plugin implements DefterHost {
   private async setType(leaf: WorkspaceLeaf, type: string) {
     this.switching.add(leaf);
     try {
-      const state = leaf.getViewState();
-      await leaf.setViewState({ ...state, type });
+      await leaf.setViewState({ ...leaf.getViewState(), type });
     } finally {
       this.switching.delete(leaf);
     }
@@ -143,7 +208,7 @@ export default class DefterPlugin extends Plugin implements DefterHost {
 
   async createNotebook(folder: TFolder) {
     const file = await this.app.vault.create(this.uniquePath(folder, "Untitled notebook", "md"), serializeNotebook(emptyNotebook()));
-    const leaf = this.app.workspace.getLeaf(true);
+    const leaf = this.app.workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE, state: { file: file.path }, active: true });
   }
 
