@@ -1,0 +1,10 @@
+{
+  "id": "defter",
+  "name": "Defter",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Paper notebooks: type in animated handwriting, draw and highlight with the mouse, on ruled pages stored as plain Markdown.",
+  "author": "Umut",
+  "authorUrl": "https://github.com/HIMURAw",
+  "isDesktopOnly": true
+}
