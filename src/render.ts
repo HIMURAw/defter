@@ -2,11 +2,45 @@
 import type { Stroke } from "./format";
 import { inkFor, type FontDef, type Tone } from "./settings";
 
-export const W = 820;
-export const H = 1160;
 export const LINE = 36;
 export const TEXT_TOP = 72;
-export const TEXT_LINES = 28;
+const TEXT_LEFT = 96;
+const TEXT_RIGHT = 44;
+const BOTTOM = 80;
+
+/** Units per millimetre: A4 (210 mm) is 820 units wide. */
+const MM = 820 / 210;
+const SIZES_MM: Record<string, [number, number]> = {
+  a4: [210, 297],
+  b5: [176, 250],
+  a5: [148, 210],
+  square: [210, 210],
+};
+
+export interface PageDims {
+  w: number;
+  h: number;
+  /** Text box width and height (a whole number of ruled lines). */
+  tw: number;
+  th: number;
+  lines: number;
+}
+
+export function pageDims(size: string): PageDims {
+  const [mw, mh] = SIZES_MM[size] ?? SIZES_MM.a4;
+  const w = Math.round(mw * MM);
+  const h = Math.round(mh * MM);
+  const lines = Math.floor((h - TEXT_TOP - BOTTOM) / LINE);
+  return { w, h, tw: w - TEXT_LEFT - TEXT_RIGHT, th: lines * LINE, lines };
+}
+
+/** Sets the CSS variables that size a page element. */
+export function applyDims(el: HTMLElement, d: PageDims) {
+  el.style.setProperty("--pw", d.w + "px");
+  el.style.setProperty("--ph", d.h + "px");
+  el.style.setProperty("--tw", d.tw + "px");
+  el.style.setProperty("--th", d.th + "px");
+}
 /** Gap between the baseline and the ruled line below it. */
 const BASELINE_GAP = 6;
 

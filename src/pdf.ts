@@ -1,6 +1,6 @@
 import { Notice } from "obsidian";
 import type { Notebook } from "./format";
-import { H, W, drawStrokes, fontMetrics, lineFormats, wobble } from "./render";
+import { applyDims, drawStrokes, fontMetrics, lineFormats, pageDims, wobble } from "./render";
 import { inkFor, type NotebookLook } from "./settings";
 
 interface Remote {
@@ -19,6 +19,8 @@ function getRemote(): Remote | null {
 
 function renderPage(root: HTMLElement, text: string, ink: Notebook["pages"][number]["ink"], n: number, look: NotebookLook) {
   const sheet = root.createDiv("defter-sheet defter-print-sheet");
+  const d = pageDims(look.page);
+  applyDims(sheet, d);
   sheet.dataset.paper = look.paper;
   sheet.dataset.tone = look.tone;
   const m = fontMetrics(look.font, look.scale);
@@ -30,8 +32,8 @@ function renderPage(root: HTMLElement, text: string, ink: Notebook["pages"][numb
 
   const layer = (kind: "hl" | "pen") => {
     const c = sheet.createEl("canvas", { cls: "defter-layer " + (kind === "hl" ? "defter-hl" : "defter-ink") });
-    c.width = W * 2;
-    c.height = H * 2;
+    c.width = d.w * 2;
+    c.height = d.h * 2;
     const ctx = c.getContext("2d")!;
     ctx.setTransform(2, 0, 0, 2, 0, 0);
     drawStrokes(ctx, ink.filter((s) => s.t === kind), look.tone);
@@ -68,7 +70,7 @@ export async function exportPdf(title: string, nb: Notebook, look: NotebookLook)
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     const data = await remote.getCurrentWebContents().printToPDF({
       printBackground: true,
-      pageSize: { width: W / 96, height: H / 96 },
+      pageSize: { width: pageDims(look.page).w / 96, height: pageDims(look.page).h / 96 },
       margins: { top: 0, bottom: 0, left: 0, right: 0 },
     });
     document.body.removeClass("defter-printing");

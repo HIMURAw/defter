@@ -6,6 +6,14 @@ export type Tone = "cream" | "white" | "dark";
 export type FontId = "caveat" | "kalam" | "patrick" | "shantell";
 export type SizeId = "small" | "medium" | "large";
 export type AnimSpeed = "off" | "fast" | "normal" | "slow";
+export type PageSize = "a4" | "b5" | "a5" | "square";
+
+export const PAGE_SIZES: { id: PageSize; label: string }[] = [
+  { id: "a4", label: "A4" },
+  { id: "b5", label: "B5" },
+  { id: "a5", label: "A5" },
+  { id: "square", label: "Square" },
+];
 
 export interface FontDef {
   id: FontId;
@@ -68,6 +76,7 @@ export function inkFor(color: string, tone: Tone): string {
 }
 
 export interface DefterSettings {
+  page: PageSize;
   paper: Paper;
   tone: Tone;
   font: FontId;
@@ -83,6 +92,7 @@ export interface DefterSettings {
 }
 
 export const DEFAULT_SETTINGS: DefterSettings = {
+  page: "a4",
   paper: "ruled",
   tone: "cream",
   font: "caveat",
@@ -96,6 +106,7 @@ export const DEFAULT_SETTINGS: DefterSettings = {
 };
 
 export interface NotebookLook {
+  page: PageSize;
   paper: Paper;
   tone: Tone;
   font: FontDef;
@@ -114,6 +125,7 @@ export function resolveLook(frontmatter: string, name: string, s: DefterSettings
   const ink = getProp(frontmatter, "defter-ink");
   const cover = getProp(frontmatter, "defter-cover");
   return {
+    page: pick(getProp(frontmatter, "defter-page"), PAGE_SIZES.map((p) => p.id), s.page),
     paper: pick(getProp(frontmatter, "defter-paper"), PAPERS.map((p) => p.id), s.paper),
     tone: pick(getProp(frontmatter, "defter-tone"), TONES.map((t) => t.id), s.tone),
     font: FONTS.find((f) => f.id === fontId)!,
@@ -151,6 +163,10 @@ export class DefterSettingTab extends PluginSettingTab {
       cls: "setting-item-description",
     });
 
+    new Setting(containerEl).setName("Page size").addDropdown((d) => {
+      for (const p of PAGE_SIZES) d.addOption(p.id, p.label);
+      d.setValue(s.page).onChange(async (v) => ((s.page = v as PageSize), await save()));
+    });
     new Setting(containerEl).setName("Paper").addDropdown((d) => {
       for (const p of PAPERS) d.addOption(p.id, p.label);
       d.setValue(s.paper).onChange(async (v) => ((s.paper = v as Paper), await save()));

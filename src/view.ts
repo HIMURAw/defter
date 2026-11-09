@@ -12,7 +12,8 @@ import {
   type Stroke,
   type StrokeKind,
 } from "./format";
-import { H, W, drawStrokes, fontMetrics, lineFormats, linkAt, snapShape, strokePoints, wobble } from "./render";
+import { applyDims, pageDims, drawStrokes, fontMetrics, lineFormats, linkAt, snapShape, strokePoints, wobble } from "./render";
+import type { PageDims } from "./render";
 import { ANIM, HIGHLIGHTS, INKS, inkFor, resolveLook, type DefterSettings, type NotebookLook } from "./settings";
 import { NotebookSettingsModal } from "./notebook-settings";
 
@@ -48,6 +49,7 @@ export interface DefterHost {
 export class DefterView extends TextFileView {
   nb: Notebook = emptyNotebook();
   look!: NotebookLook;
+  private dims: PageDims = pageDims("a4");
   private host: DefterHost;
   private pageIndex = 0;
   private rawBroken: string | null = null;
@@ -175,6 +177,10 @@ export class DefterView extends TextFileView {
   applyLook() {
     this.look = resolveLook(this.nb.frontmatter, this.file?.basename ?? "", this.host.settings);
     const { paper, tone, font, scale, ink } = this.look;
+    this.dims = pageDims(this.look.page);
+    applyDims(this.sheetEl, this.dims);
+    this.sizeCanvases();
+    this.fitToPane();
     this.sheetEl.dataset.paper = paper;
     this.sheetEl.dataset.tone = tone;
     const apply = () => {
@@ -235,11 +241,7 @@ export class DefterView extends TextFileView {
     this.textEl.spellcheck = false;
     this.pageNoEl = this.sheetEl.createDiv("defter-pageno");
 
-    for (const c of [this.hlCanvas, this.inkCanvas]) {
-      c.width = W * 2;
-      c.height = H * 2;
-      c.getContext("2d")!.setTransform(2, 0, 0, 2, 0, 0);
-    }
+    this.sizeCanvases();
 
     this.buildDock(root);
     this.buildDrawer(root);
@@ -356,13 +358,23 @@ export class DefterView extends TextFileView {
     else this.textEl.blur();
   }
 
+  private sizeCanvases() {
+    for (const c of [this.hlCanvas, this.inkCanvas]) {
+      if (c.width === this.dims.w * 2 && c.height === this.dims.h * 2) continue;
+      c.width = this.dims.w * 2;
+      c.height = this.dims.h * 2;
+      c.getContext("2d")!.setTransform(2, 0, 0, 2, 0, 0);
+    }
+  }
+
   private fitToPane() {
     const avail = this.deskEl.clientWidth - 48;
     if (avail <= 0) return;
-    const s = Math.min(1.35, Math.max(0.45, avail / W));
+    // Same zoom for every page size, so text looks the same and an A5 is a smaller page.
+    const s = Math.min(1.35, Math.max(0.45, avail / 820), avail / this.dims.w);
     this.sheetEl.style.transform = `scale(${s})`;
-    this.holderEl.style.width = W * s + "px";
-    this.holderEl.style.height = H * s + "px";
+    this.holderEl.style.width = this.dims.w * s + "px";
+    this.holderEl.style.height = this.dims.h * s + "px";
   }
 
   // ---- Pages drawer (list + search) ----------------------------------------
@@ -599,7 +611,8 @@ export class DefterView extends TextFileView {
 
   private fits(value: string) {
     this.textEl.value = value;
-    return this.textEl.scrollHeight <= this.textEl.clientHeight;
+    // Chromium can report one pixel extra on a full page; that still fits.
+    return this.textEl.scrollHeight <= this.textEl.clientHeight + 2;
   }
 
   // When the page is full the overflow continues on the next page, like
@@ -608,8 +621,8 @@ export class DefterView extends TextFileView {
     const ta = this.textEl;
     // A page that is not laid out (background tab, view still opening) has no
     // real height: measuring it would push all the text onto the next page.
-    if (!ta.isShown() || ta.clientHeight < 500) return;
-    if (ta.scrollHeight <= ta.clientHeight) return;
+    if (!ta.isShown() || ta.clientHeight < this.dims.th - 2) return;
+    if (ta.scrollHeight <= ta.clientHeight + 2) return;
     const full = ta.value;
     const caret = ta.selectionStart;
     let lo = 0;
@@ -620,11 +633,18 @@ export class DefterView extends TextFileView {
       else hi = mid - 1;
     }
     let cut = lo;
-    const boundary = Math.max(full.lastIndexOf(" ", cut), full.lastIndexOf("\n", cut));
-    if (boundary > 0 && cut - boundary < 24 && cut < full.length) cut = boundary + 1;
+    let skip = 0;
+    if (full[cut] === "\n") {
+      // The page ends exactly at a line break: the next page starts with the next line.
+      skip = 1;
+    } else {
+      // Otherwise break before the last word instead of in the middle of it.
+      const boundary = Math.max(full.lastIndexOf(" ", cut - 1), full.lastIndexOf("\n", cut - 1));
+      if (boundary > 0 && cut - boundary < 24 && cut < full.length) cut = boundary + 1;
+    }
 
     ta.value = full.slice(0, cut).replace(/\n$/, "");
-    const rest = full.slice(cut);
+    const rest = full.slice(cut + skip);
     this.syncMirror(false);
 
     if (this.pageIndex === this.nb.pages.length - 1) this.nb.pages.push(emptyPage());
@@ -637,7 +657,7 @@ export class DefterView extends TextFileView {
 
     if (follow && caret >= cut) {
       this.showPage(this.pageIndex + 1, 1);
-      const pos = Math.min(caret - cut, ta.value.length);
+      const pos = Math.max(0, Math.min(caret - cut - skip, ta.value.length));
       ta.focus({ preventScroll: true });
       ta.setSelectionRange(pos, pos);
       this.deskEl.scrollTop = 0;
@@ -652,15 +672,15 @@ export class DefterView extends TextFileView {
   private point(e: PointerEvent): [number, number] {
     const r = this.inkCanvas.getBoundingClientRect();
     return [
-      Math.round(((e.clientX - r.left) / r.width) * W * 2) / 2,
-      Math.round(((e.clientY - r.top) / r.height) * H * 2) / 2,
+      Math.round(((e.clientX - r.left) / r.width) * this.dims.w * 2) / 2,
+      Math.round(((e.clientY - r.top) / r.height) * this.dims.h * 2) / 2,
     ];
   }
 
   private redrawLayer(kind: StrokeKind) {
     const canvas = kind === "hl" ? this.hlCanvas : this.inkCanvas;
     const ctx = canvas.getContext("2d")!;
-    ctx.clearRect(0, 0, W, H);
+    ctx.clearRect(0, 0, this.dims.w, this.dims.h);
     const strokes = this.page.ink.filter((s) => s.t === kind);
     if (this.stroke && this.stroke.t === kind) strokes.push(this.stroke);
     drawStrokes(ctx, strokes, this.look.tone);

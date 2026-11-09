@@ -1,5 +1,5 @@
 import { Modal, type App } from "obsidian";
-import { COVERS, FONTS, INKS, PAPERS, SIZES, TONES, inkFor } from "./settings";
+import { COVERS, FONTS, INKS, PAGE_SIZES, PAPERS, SIZES, TONES, inkFor } from "./settings";
 import { getProp } from "./format";
 import type { DefterView } from "./view";
 
@@ -38,6 +38,13 @@ export class NotebookSettingsModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     const look = this.view.look;
+
+    const page = this.section("Page size");
+    for (const p of PAGE_SIZES) {
+      const b = page.createEl("button", { cls: "defter-seg", text: p.label });
+      b.toggleClass("is-active", look.page === p.id);
+      b.onclick = () => this.set("defter-page", p.id);
+    }
 
     const paper = this.section("Paper");
     for (const p of PAPERS) {
@@ -99,7 +106,7 @@ export class NotebookSettingsModal extends Modal {
     const foot = contentEl.createDiv("defter-set-foot");
     foot.createSpan({ cls: "defter-set-hint", text: "Saved in this notebook's properties. Defaults are in Settings → Defter." });
     const reset = foot.createEl("button", { text: "Use defaults" });
-    const keys = ["defter-paper", "defter-tone", "defter-font", "defter-size", "defter-ink", "defter-cover"];
+    const keys = ["defter-page", "defter-paper", "defter-tone", "defter-font", "defter-size", "defter-ink", "defter-cover"];
     reset.disabled = !keys.some((k) => getProp(this.view.nb.frontmatter, k) !== null);
     reset.onclick = () => {
       for (const k of keys) this.view.nb.frontmatter = this.view.nb.frontmatter.replace(new RegExp(`^${k}:.*\\n?`, "m"), "").replace(/\n$/, "");
