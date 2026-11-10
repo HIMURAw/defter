@@ -7,7 +7,10 @@
 export const LOCK_KEY = "defter-lock";
 const OPEN = "<!-- defter:locked";
 const CLOSE = "-->";
-const ITERATIONS = 310_000;
+const ITERATIONS = 600_000;
+/** Iteration counts read from a file are kept in a sane range (a huge one would freeze Obsidian). */
+const MIN_ITER = 1_000;
+const MAX_ITER = 5_000_000;
 
 interface Wrapped {
   salt: string;
@@ -177,6 +180,7 @@ export function parseLocked(md: string): { frontmatter: string; data: LockedData
     throw new Error("The private notebook block is damaged.");
   }
   if (data?.v !== 1 || !data.wp || !data.wr || !data.ct) throw new Error("The private notebook block is damaged.");
+  if (!Number.isInteger(data.iter) || data.iter < MIN_ITER || data.iter > MAX_ITER) throw new Error("The private notebook block is damaged.");
   return { frontmatter, data };
 }
 

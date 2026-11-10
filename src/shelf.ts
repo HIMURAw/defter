@@ -246,6 +246,8 @@ export class ShelfView extends ItemView {
     const cover = typeof fm?.["defter-cover"] === "string" ? fm["defter-cover"] : defaultCover(f.basename);
     const h = hash(f.basename);
     const book = inner.createEl("button", { cls: "defter-spine" });
+    const style = fm?.["defter-cover-style"];
+    if (typeof style === "string" && style !== "plain") book.dataset.style = style;
     book.style.setProperty("--cover", cover);
     book.style.setProperty("--w", Math.min(64, 30 + Math.round(Math.sqrt(n) * 6)) + "px");
     book.style.setProperty("--h", 150 + (h % 5) * 9 + "px");

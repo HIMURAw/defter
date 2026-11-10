@@ -51,6 +51,10 @@ export interface FontMetrics {
 }
 
 const metricsCache = new Map<string, FontMetrics>();
+/** After the user's own font changed. */
+export function clearFontMetrics() {
+  metricsCache.clear();
+}
 
 // Every font gets the same x-height as the reference (Caveat at 29px) and its
 // baseline is placed just above the ruled line, so all fonts sit on the paper.
@@ -180,10 +184,34 @@ function drawFountain(ctx: CanvasRenderingContext2D, s: Stroke) {
   }
 }
 
+/** A stylus line: each segment as wide as the pen was pressed. */
+function drawPressure(ctx: CanvasRenderingContext2D, s: Stroke) {
+  const p = s.p;
+  const q = s.q!;
+  if (p.length < 4) {
+    ctx.beginPath();
+    ctx.lineWidth = s.w * (0.4 + q[0] * 1.2);
+    traceFree(ctx, p);
+    ctx.stroke();
+    return;
+  }
+  for (let i = 2; i < p.length; i += 2) {
+    ctx.beginPath();
+    ctx.lineWidth = s.w * (0.35 + ((q[i / 2 - 1] + q[i / 2]) / 2) * 1.3);
+    ctx.moveTo(p[i - 2], p[i - 1]);
+    ctx.lineTo(p[i], p[i + 1]);
+    ctx.stroke();
+  }
+}
+
 export function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke, tone: Tone) {
   ctx.strokeStyle = s.t === "hl" ? s.c : inkFor(s.c, tone);
   ctx.globalAlpha = s.t === "hl" ? (tone === "dark" ? 0.32 : 0.42) : s.y === "pencil" ? 0.72 : 1;
   ctx.setLineDash(s.y === "dash" ? [s.w * 3 + 4, s.w * 2.4 + 5] : []);
+  if (s.q && !s.s) {
+    drawPressure(ctx, s);
+    return;
+  }
   if (s.y === "fountain" && !s.s) {
     drawFountain(ctx, s);
     return;

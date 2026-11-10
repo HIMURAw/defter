@@ -1,7 +1,7 @@
 import { FuzzySuggestModal, MarkdownView, Notice, type App, Plugin, TFile, TFolder, WorkspaceLeaf, debounce, normalizePath, type ViewState } from "obsidian";
 import { DefterView, VIEW_TYPE, type DefterHost } from "./view";
 import { FRONTMATTER_KEY, emptyNotebook, fromLegacy, isNotebookText, parseNotebook, serializeNotebook, type Notebook } from "./format";
-import { DefterSettingTab, freshSettings, setDateLocale, type DefterSettings, type NotebookLook } from "./settings";
+import { DefterSettingTab, FONTS, freshSettings, setDateLocale, type DefterSettings, type NotebookLook } from "./settings";
 import { SHELF_VIEW, ShelfView, type ShelfHost } from "./shelf";
 import { exportPdf } from "./pdf";
 import { NewNotebookModal, todayStr } from "./new-notebook";
@@ -9,6 +9,9 @@ import { StudyTimer } from "./timer";
 import { isDue, parseCards, type CardState } from "./cards";
 import { StudyModal, type StudyItem } from "./study-modal";
 import { LOCK_KEY } from "./lock";
+import { clearFontMetrics } from "./render";
+import { WelcomeModal, welcomeNotebook } from "./welcome";
+import { PenSound } from "./sound";
 import { cardKey } from "./cards";
 import { T, setLanguage } from "./i18n";
 
@@ -21,21 +24,32 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
   private switching = new WeakSet<WorkspaceLeaf>();
   private saveSoon = debounce(() => void this.saveSettings(), 1500, true);
   timer!: StudyTimer;
+  sound = new PenSound();
 
   async onload() {
     this.settings = freshSettings(await this.loadData());
     setDateLocale(this.settings.dateLocale);
     setLanguage(this.settings.language);
+    await this.registerCustomFont();
     this.addSettingTab(new DefterSettingTab(this.app, this));
     this.timer = new StudyTimer(this, this.addStatusBarItem());
     this.registerInterval(window.setInterval(() => this.timer.tick(), 1000));
     this.registerInterval(window.setInterval(() => this.autoLock(), 20_000));
     this.register(() => this.timer.stop());
+    this.register(() => this.sound.close());
+    // Flush settings before unloading so a pending save cannot write old values later.
+    this.register(() => this.saveSoon.run());
 
     this.registerView(VIEW_TYPE, (leaf) => new DefterView(leaf, this));
     this.registerView(SHELF_VIEW, (leaf) => new ShelfView(leaf, this));
     this.interceptOpen();
     this.app.workspace.onLayoutReady(() => {
+      if (!this.settings.welcomed) {
+        this.settings.welcomed = true;
+        void this.saveSettings();
+        // A moment after start, so it does not fight the workspace loading.
+        window.setTimeout(() => this.showWelcome(), 1500);
+      }
       void this.switchLeaves();
       this.reportLegacy();
     });
@@ -54,6 +68,7 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
     this.addCommand({ id: "open-journal", name: T("Open today's journal page"), callback: () => this.openJournal() });
     this.addCommand({ id: "review-cards", name: T("Study due flashcards in all notebooks"), callback: () => void this.reviewAll() });
     this.addCommand({ id: "open-private", name: T("Open private notebook…"), callback: () => this.openPrivate() });
+    this.addCommand({ id: "welcome", name: T("Show the welcome tour"), callback: () => this.showWelcome() });
     this.addCommand({ id: "stop-timer", name: T("Stop the study timer"), callback: () => this.timer.stop() });
     this.addCommand({
       id: "open-as-notebook",
@@ -173,6 +188,71 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
     new StudyModal(this.app, items, this).open();
   }
 
+  showWelcome() {
+    new WelcomeModal(this.app, () => void this.openWelcomeNotebook()).open();
+  }
+
+  /** Creates (or opens) the welcome notebook at the top of the vault. */
+  async openWelcomeNotebook() {
+    const name = normalizePath(`${T("Welcome to Defter")}.md`);
+    let file = this.app.vault.getAbstractFileByPath(name);
+    if (!(file instanceof TFile)) file = await this.app.vault.create(name, welcomeNotebook());
+    if (file instanceof TFile) this.openNotebook(file);
+  }
+
+  private customFace: FontFace | null = null;
+
+  /** Loads the user's own handwriting font (kept in the plugin folder). */
+  private async registerCustomFont() {
+    const s = this.settings;
+    if (this.customFace) document.fonts.delete(this.customFace);
+    this.customFace = null;
+    const i = FONTS.findIndex((f) => f.id === "custom");
+    if (i !== -1) FONTS.splice(i, 1);
+    clearFontMetrics();
+    if (!s.customFont) return;
+    try {
+      const data = await this.app.vault.adapter.readBinary(`${this.manifest.dir}/${s.customFont}`);
+      const face = new FontFace("Defter Custom", data);
+      await face.load();
+      document.fonts.add(face);
+      this.customFace = face;
+      FONTS.push({ id: "custom", label: s.customFontName || T("My handwriting"), family: "Defter Custom", weight: 400 });
+    } catch (e) {
+      new Notice(T("Your handwriting font could not be loaded: ") + (e as Error).message);
+    }
+  }
+
+  async loadCustomFont(file: File) {
+    const ext = (file.name.split(".").pop() || "ttf").toLowerCase();
+    if (!["ttf", "otf", "woff", "woff2"].includes(ext)) {
+      new Notice(T("Choose a .ttf, .otf, .woff or .woff2 font file."));
+      return;
+    }
+    const name = `my-handwriting.${ext}`;
+    if (this.settings.customFont && this.settings.customFont !== name)
+      await this.app.vault.adapter.remove(`${this.manifest.dir}/${this.settings.customFont}`).catch(() => undefined);
+    await this.app.vault.adapter.writeBinary(`${this.manifest.dir}/${name}`, await file.arrayBuffer());
+    this.settings.customFont = name;
+    this.settings.customFontName = file.name.replace(/\.[^.]+$/, "");
+    await this.registerCustomFont();
+    if (FONTS.some((f) => f.id === "custom")) this.settings.font = "custom";
+    await this.saveSettings();
+    this.refreshViews();
+    new Notice(T("Your handwriting is ready. New text is written with it."));
+  }
+
+  async removeCustomFont() {
+    const s = this.settings;
+    if (s.customFont) await this.app.vault.adapter.remove(`${this.manifest.dir}/${s.customFont}`).catch(() => undefined);
+    s.customFont = "";
+    s.customFontName = "";
+    if (s.font === "custom") s.font = "caveat";
+    await this.registerCustomFont();
+    await this.saveSettings();
+    this.refreshViews();
+  }
+
   async saveSettings() {
     await this.saveData(this.settings);
   }
@@ -206,6 +286,8 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
   private autoLock() {
     const min = this.settings.lockMinutes;
     if (!min) return;
+    // Not while a window is open (changing the password, the recovery key).
+    if (document.querySelector(".modal-container")) return;
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
       const v = leaf.view as DefterView;
       if (v.isPrivate && Date.now() - v.lastActive > min * 60_000) void v.lockNow();

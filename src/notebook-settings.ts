@@ -1,5 +1,5 @@
 import { Modal, type App } from "obsidian";
-import { COVERS, FONTS, INKS, PAGE_SIZES, PAPERS, SIZES, TONES, inkFor } from "./settings";
+import { BINDINGS, COVERS, COVER_STYLES, FONTS, INKS, PAGE_SIZES, PAPERS, SIZES, TONES, inkFor } from "./settings";
 import { getProp } from "./format";
 import type { DefterView } from "./view";
 import { T } from "./i18n";
@@ -69,6 +69,13 @@ export class NotebookSettingsModal extends Modal {
       tile.onclick = () => this.set("defter-tone", t.id);
     }
 
+    const binding = this.section("Binding");
+    for (const b of BINDINGS) {
+      const btn = binding.createEl("button", { cls: "defter-seg", text: T(b.label) });
+      btn.toggleClass("is-active", look.binding === b.id);
+      btn.onclick = () => this.set("defter-binding", b.id);
+    }
+
     const font = this.section("Handwriting");
     font.addClass("defter-set-column");
     for (const f of FONTS) {
@@ -104,10 +111,17 @@ export class NotebookSettingsModal extends Modal {
       b.onclick = () => this.set("defter-cover", c);
     }
 
+    const style = this.section("Cover style");
+    for (const c of COVER_STYLES) {
+      const b = style.createEl("button", { cls: "defter-seg", text: T(c.label) });
+      b.toggleClass("is-active", look.coverStyle === c.id);
+      b.onclick = () => this.set("defter-cover-style", c.id);
+    }
+
     const foot = contentEl.createDiv("defter-set-foot");
     foot.createSpan({ cls: "defter-set-hint", text: T("Saved in this notebook's properties. Defaults are in Settings → Defter.") });
     const reset = foot.createEl("button", { text: T("Use defaults") });
-    const keys = ["defter-page", "defter-paper", "defter-tone", "defter-font", "defter-size", "defter-ink", "defter-cover"];
+    const keys = ["defter-page", "defter-paper", "defter-tone", "defter-font", "defter-size", "defter-ink", "defter-cover", "defter-binding", "defter-cover-style"];
     reset.disabled = !keys.some((k) => getProp(this.view.nb.frontmatter, k) !== null);
     reset.onclick = () => {
       for (const k of keys) this.view.nb.frontmatter = this.view.nb.frontmatter.replace(new RegExp(`^${k}:.*\\n?`, "m"), "").replace(/\n$/, "");

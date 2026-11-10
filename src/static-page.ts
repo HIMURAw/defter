@@ -16,6 +16,7 @@ export function renderStaticPage(app: App, root: HTMLElement, title: string, pag
   drawDecor(app, sheet.createDiv("defter-decor"), page, d, title);
   if (page.bg) sheet.dataset.bg = "1";
   sheet.dataset.paper = look.paper;
+  sheet.dataset.binding = look.binding;
   sheet.dataset.tone = look.tone;
   const m = fontMetrics(look.font, look.scale);
   sheet.style.setProperty("--defter-family", `"${look.font.family}"`);

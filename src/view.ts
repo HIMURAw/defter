@@ -1,4 +1,4 @@
-import { Menu, Modal, Notice, Scope, Setting, TextFileView, normalizePath, setIcon, type App, type WorkspaceLeaf } from "obsidian";
+import { Menu, Modal, Notice, Platform, Scope, Setting, TextFileView, normalizePath, setIcon, type App, type WorkspaceLeaf } from "obsidian";
 import {
   emptyNotebook,
   emptyPage,
@@ -37,6 +37,7 @@ import { parseCards, isDue, type CardState } from "./cards";
 import { StudyModal, type StudyHost } from "./study-modal";
 import type { StudyTimer } from "./timer";
 import { WritePad } from "./write-pad";
+import type { PenSound } from "./sound";
 import { importPdf } from "./pdf-import";
 import { T } from "./i18n";
 import { HelpModal, StickerModal } from "./panels";
@@ -124,6 +125,7 @@ type Drag =
 export interface DefterHost extends StudyHost {
   settings: DefterSettings;
   timer: StudyTimer;
+  sound: PenSound;
   saveSettings(): Promise<void>;
   openAsMarkdown(leaf: WorkspaceLeaf): void;
   rememberPage(path: string, page: number): void;
@@ -293,9 +295,11 @@ export class DefterView extends TextFileView {
       menu.addItem((i) => i.setSection("action").setTitle(T("Remove this page")).setIcon("file-minus").onClick(() => this.removePage(this.pageIndex)));
       menu.addItem((i) => i.setSection("action").setTitle(T("Import PDF pages…")).setIcon("file-input").onClick(() => this.importPdf()));
       menu.addItem((i) => i.setSection("action").setTitle(T("Pull text back from the next pages")).setIcon("wrap-text").onClick(() => this.reflow()));
-      menu.addItem((i) => i.setSection("action").setTitle(T("Export to PDF")).setIcon("file-output").onClick(() => this.exportPdf()));
-      menu.addItem((i) => i.setSection("action").setTitle(T("Copy page as image")).setIcon("image").onClick(() => void this.pageImage("copy")));
-      menu.addItem((i) => i.setSection("action").setTitle(T("Save page as PNG")).setIcon("image-down").onClick(() => void this.pageImage("save")));
+      if (Platform.isDesktopApp) {
+        menu.addItem((i) => i.setSection("action").setTitle(T("Export to PDF")).setIcon("file-output").onClick(() => this.exportPdf()));
+        menu.addItem((i) => i.setSection("action").setTitle(T("Copy page as image")).setIcon("image").onClick(() => void this.pageImage("copy")));
+        menu.addItem((i) => i.setSection("action").setTitle(T("Save page as PNG")).setIcon("image-down").onClick(() => void this.pageImage("save")));
+      }
       if (this.lock) {
         menu.addItem((i) => i.setSection("lock").setTitle(T("Lock now")).setIcon("lock").onClick(() => void this.lockNow()));
         menu.addItem((i) => i.setSection("lock").setTitle(T("Change password…")).setIcon("key-round").onClick(() => this.changePassword()));
@@ -320,11 +324,42 @@ export class DefterView extends TextFileView {
   }
 
   /** Private notebooks are encrypted before Obsidian writes the file. */
+  private sealSeq = 0;
+
   async save(clear?: boolean) {
     if (this.lock && this.rawBroken === null) {
-      this.sealed = await sealNotebook(this.lock, this.nb.frontmatter, serializeNotebook(this.nb));
+      // Saves can overlap (autosave + lock); an older result never replaces a newer one.
+      const seq = ++this.sealSeq;
+      const sealed = await sealNotebook(this.lock, this.nb.frontmatter, serializeNotebook(this.nb));
+      if (seq === this.sealSeq) this.sealed = sealed;
+      else return;
     }
     return super.save(clear);
+  }
+
+  /** Drops everything shown from a private notebook. */
+  private wipe() {
+    this.nb = emptyNotebook();
+    this.mirrorEl.empty();
+    this.spans = [];
+    this.textEl.value = "";
+    this.prevText = "";
+    this.undoStack = [];
+    this.redoStack = [];
+    this.revealed.clear();
+    for (const c of [this.inkCanvas, this.hlCanvas]) c.getContext("2d")?.clearRect(0, 0, c.width, c.height);
+    this.objLowEl.empty();
+    this.objHighEl.empty();
+    this.decorEl.empty();
+    this.listEl.empty();
+    this.partnerEl?.remove();
+    this.partnerEl = null;
+    this.tabsEl.empty();
+  }
+
+  /** Pictures, PDF pages and exports of a private notebook are not encrypted: say so. */
+  private warnPlain(what: string) {
+    if (this.lock) new Notice(T(what), 8000);
   }
 
   setViewData(data: string, clear: boolean) {
@@ -339,6 +374,7 @@ export class DefterView extends TextFileView {
       }
       this.lock = null;
       this.sealed = null;
+      this.wipe();
       this.showLockScreen(data);
       return;
     }
@@ -358,7 +394,13 @@ export class DefterView extends TextFileView {
       this.deskEl.toggle(true);
       this.dockEl.toggle(true);
     } catch (e) {
-      this.rawBroken = data;
+      // A private notebook whose decrypted text cannot be read: keep the
+      // encrypted file exactly as it is, never the decrypted text.
+      if (this.lock) {
+        this.rawBroken = this.sealed ?? "";
+        this.lock = null;
+        this.wipe();
+      } else this.rawBroken = data;
       this.errorEl.setText(
         T("This notebook could not be read, so it was left unchanged. Use “Open as Markdown” to look at the file.") + " " +
           ((e as Error).message || "")
@@ -432,6 +474,7 @@ export class DefterView extends TextFileView {
     this.sizeCanvases();
     this.fitToPane();
     this.sheetEl.dataset.paper = paper;
+    this.sheetEl.dataset.binding = this.look.binding;
     this.sheetEl.dataset.tone = tone;
     const apply = () => {
       const m = fontMetrics(font, scale);
@@ -466,6 +509,7 @@ export class DefterView extends TextFileView {
 
   private async exportPdf() {
     this.finishStroke();
+    this.warnPlain("The exported PDF is not encrypted.");
     await this.host.exportPdf(this.getDisplayText(), this.nb, this.look);
   }
 
@@ -510,8 +554,10 @@ export class DefterView extends TextFileView {
     this.registerDomEvent(this.textEl, "click", (e) => this.onTextClick(e));
     this.registerDomEvent(this.inkCanvas, "pointerdown", (e) => this.onPointerDown(e));
     this.registerDomEvent(this.inkCanvas, "pointermove", (e) => this.onPointerMove(e));
-    this.registerDomEvent(this.inkCanvas, "pointerup", () => this.onPointerUp());
-    this.registerDomEvent(this.inkCanvas, "pointercancel", () => this.onPointerUp());
+    // A palm lifting while the stylus draws must not end the line.
+    const up = (e: PointerEvent) => !(e.pointerType === "touch" && this.stylusSeen) && this.onPointerUp();
+    this.registerDomEvent(this.inkCanvas, "pointerup", up);
+    this.registerDomEvent(this.inkCanvas, "pointercancel", up);
     this.registerDomEvent(this.inkCanvas, "dblclick", (e) => this.onDoubleClick(e));
     this.registerDomEvent(this.inkCanvas, "contextmenu", (e) => e.preventDefault());
     this.registerDomEvent(root, "keydown", (e) => this.onKeyDown(e));
@@ -1197,6 +1243,7 @@ export class DefterView extends TextFileView {
         return;
       }
     }
+    if (e?.inputType === "insertText" && e.data?.trim()) this.host.sound.stroke(this.host.settings.penSound, this.host.settings.penVolume);
     this.syncMirror(true);
     this.fitText(true);
     this.requestSave();
@@ -1390,6 +1437,7 @@ export class DefterView extends TextFileView {
 
   private async placeImage(blob: Blob) {
     if (!this.file) return;
+    this.warnPlain("This notebook is private, but pictures are saved as separate files and are not encrypted.");
     try {
       const img = await saveImage(this.app, blob, this.file);
       const s = Math.min(1, (this.dims.w * 0.6) / img.w, (this.dims.h * 0.5) / img.h);
@@ -1784,7 +1832,15 @@ export class DefterView extends TextFileView {
     else if (hit) this.objectMenu(e, hit.obj);
   }
 
+  /** Once a stylus was used, fingers scroll and palms are ignored. */
+  private stylusSeen = false;
+
   private onPointerDown(e: PointerEvent) {
+    if (e.pointerType === "pen" && !this.stylusSeen) {
+      this.stylusSeen = true;
+      this.sheetEl.dataset.stylus = "1";
+    }
+    if (e.pointerType === "touch" && this.stylusSeen) return;
     if (this.tool === "write") return;
     if (this.tool === "pad") {
       const [x, y] = this.point(e);
@@ -1840,6 +1896,7 @@ export class DefterView extends TextFileView {
       this.stroke = { t: "hl", c: this.hlColor, w: HL_WIDTH, p: [x, y] };
     } else {
       this.stroke = this.newPenStroke(x, y);
+      if (e.pointerType === "pen" && e.pressure > 0) this.stroke.q = [Math.round(e.pressure * 100) / 100];
       this.armHold();
     }
     this.queueDraw();
@@ -1861,6 +1918,7 @@ export class DefterView extends TextFileView {
       if (!shape) return;
       st.s = shape.s;
       st.p = shape.p;
+      delete st.q;
       if (st.y === "fountain") delete st.y;
       this.snapped = true;
       this.queueDraw();
@@ -1868,6 +1926,7 @@ export class DefterView extends TextFileView {
   }
 
   private onPointerMove(e: PointerEvent) {
+    if (e.pointerType === "touch" && this.stylusSeen) return;
     if (this.drag) {
       this.onDragMove(e);
       return;
@@ -1890,8 +1949,12 @@ export class DefterView extends TextFileView {
         const [x, y] = this.point(ev);
         const dx = x - p[p.length - 2];
         const dy = y - p[p.length - 1];
-        if (dx * dx + dy * dy >= 2.25) p.push(x, y);
+        if (dx * dx + dy * dy >= 2.25) {
+          p.push(x, y);
+          this.stroke.q?.push(Math.round((ev.pressure || 0.5) * 100) / 100);
+        }
       }
+      this.host.sound.stroke(this.host.settings.penSound, this.host.settings.penVolume * (this.stroke.t === "hl" ? 0.6 : 1), 1.4);
       // Still moving: restart the hold timer.
       if (this.stroke.t === "pen") this.armHold();
     }
@@ -2012,7 +2075,7 @@ export class DefterView extends TextFileView {
     if (!this.stroke) return;
     const s = this.stroke;
     this.stroke = null;
-    if (!s.s && s.t === "pen") s.p = smoothPoints(s.p);
+    if (!s.s && s.t === "pen" && !s.q) s.p = smoothPoints(s.p);
     if (s.s && s.s !== "poly" && Math.hypot(s.p[2] - s.p[0], s.p[3] - s.p[1]) < 3) {
       this.undoStack.pop();
       this.redrawLayer(s.t);
@@ -2207,7 +2270,15 @@ export class DefterView extends TextFileView {
       const sheet = this.sheetEl.getBoundingClientRect();
       const scale = sheet.width / this.dims.w || 1;
       hl.forEach((st, k) => {
-        const pts = strokePoints(st);
+        // Sample the line every few units: a straight swipe has only two points.
+        const raw = strokePoints(st);
+        const pts: number[] = [];
+        for (let j = 0; j + 3 < raw.length || j === 0; j += 2) {
+          const [ax, ay, bx, by] = [raw[j], raw[j + 1], raw[j + 2] ?? raw[j], raw[j + 3] ?? raw[j + 1]];
+          const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 4));
+          for (let k = 0; k <= n; k++) pts.push(ax + ((bx - ax) * k) / n, ay + ((by - ay) * k) / n);
+          if (raw.length <= 2) break;
+        }
         const r = st.w / 2 + 2;
         let from = -1, to = -1;
         this.spans.forEach((sp, i) => {
@@ -2267,6 +2338,7 @@ export class DefterView extends TextFileView {
 
   private importPdf() {
     if (!this.file) return;
+    this.warnPlain("This notebook is private, but imported PDF pages are saved as pictures and are not encrypted.");
     importPdf(this.app, this.file, (imported) => {
       if (!imported.length) return;
       const empty = this.nb.pages.length === 1 && !this.page.text.trim() && !this.page.ink.length && !this.page.obj?.length && !this.page.bg;
@@ -2285,6 +2357,7 @@ export class DefterView extends TextFileView {
 
   /** Copies the page to the clipboard or saves it next to the notebook as a PNG. */
   private async pageImage(mode: "copy" | "save") {
+    this.warnPlain("The page image is not encrypted.");
     const remote = getRemote();
     if (!remote) {
       new Notice(T("Page images need the Obsidian desktop app."));
@@ -2324,6 +2397,7 @@ export class DefterView extends TextFileView {
   }
 
   private electronCopy(png: Uint8Array) {
+    if (!Platform.isDesktopApp) return;
     const electron = (window as unknown as { require: (m: string) => ElectronClip }).require("electron");
     const buf = (window as unknown as { require: (m: string) => { Buffer: { from(a: Uint8Array): unknown } } }).require("buffer").Buffer.from(png);
     electron.clipboard.writeImage(electron.nativeImage.createFromBuffer(buf));
@@ -2550,25 +2624,23 @@ export class DefterView extends TextFileView {
       this.loadText(text, false);
     } catch {
       this.lock = null;
+      this.wipe();
       this.showLockScreen(data);
     }
   }
 
   async lockNow() {
     if (!this.lock) return;
+    this.finishStroke();
+    this.pad?.close();
     await this.save();
     const sealed = this.sealed;
+    // Without a sealed copy we cannot lock safely: stay open rather than save an empty notebook.
+    if (!sealed) return;
     this.lock = null;
-    this.nb = emptyNotebook();
-    this.mirrorEl.empty();
-    this.spans = [];
-    this.textEl.value = "";
-    this.undoStack = [];
-    this.redoStack = [];
-    if (sealed) {
-      this.rawBroken = sealed;
-      this.showLockScreen(sealed);
-    }
+    this.wipe();
+    this.rawBroken = sealed;
+    this.showLockScreen(sealed);
   }
 
   private makePrivate() {
@@ -2598,6 +2670,8 @@ export class DefterView extends TextFileView {
     if (!lock) return;
     new PasswordModal(this.app, "Change password", (pw, hint) => {
       void (async () => {
+        if (this.lock !== lock) return void new Notice(T("The notebook was locked meanwhile. Nothing was changed."));
+        this.lastActive = Date.now();
         await changePassword(lock, pw, hint || undefined);
         await this.save();
         new Notice(T("Password changed. Your recovery key still works."));
@@ -2612,6 +2686,8 @@ export class DefterView extends TextFileView {
     const draft: LockSession = { key: lock.key, data: { ...lock.data } };
     const code = await renewRecovery(draft);
     new RecoveryModal(this.app, code, () => {
+      if (this.lock !== lock) return void new Notice(T("The notebook was locked meanwhile. Nothing was changed."));
+      this.lastActive = Date.now();
       lock.data.wr = draft.data.wr;
       void this.save().then(() => new Notice(T("New recovery key saved. The old one no longer works.")));
     }).open();

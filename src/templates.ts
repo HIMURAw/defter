@@ -1,6 +1,7 @@
 // Page templates: a few guide lines and labels drawn on the paper, and the
 // part of the page where typed text goes.
 import { LINE, TEXT_TOP, type PageDims } from "./render";
+import { fmtDate } from "./settings";
 import { T } from "./i18n";
 
 export interface TextBox {
@@ -91,12 +92,92 @@ export const TEMPLATES: TemplateDef[] = [
       t.style.width = d.w + "px";
       const y0 = Math.round(d.h * 0.62) + 90;
       for (const [i, name] of ["Name", "Class", "Subject"].entries()) {
-        label(el, name, Math.round(d.w * 0.2), y0 + i * 44);
+        label(el, T(name), Math.round(d.w * 0.2), y0 + i * 44);
         line(el, Math.round(d.w * 0.2) + 90, y0 + i * 44 + 34, Math.round(d.w * 0.8), y0 + i * 44 + 34);
       }
     },
   },
+  {
+    id: "week",
+    label: "Weekly plan",
+    desc: "Seven days, a few lines each, day names in the margin.",
+    box: (d) => ({ left: LEFT, width: d.w - LEFT - RIGHT, lines: d.lines }),
+    draw: (el, d) => {
+      const per = Math.max(2, Math.floor(d.lines / 7));
+      const days = weekdays();
+      for (let i = 0; i < 7; i++) {
+        const y = TEXT_TOP + i * per * LINE;
+        if (i) line(el, 20, y, d.w - 20, y, "is-strong");
+        label(el, days[i], 14, y + 2, "is-day");
+      }
+    },
+  },
+  {
+    id: "month",
+    label: "Monthly calendar",
+    desc: "A month grid: write the month on top and the day numbers in the boxes.",
+    box: (d) => ({ left: LEFT, width: d.w - LEFT - RIGHT, lines: 1 }),
+    draw: (el, d) => {
+      const top = TEXT_TOP + LINE * 2;
+      const left = 28;
+      const cw = (d.w - 56) / 7;
+      const ch = (d.h - top - 60) / 6;
+      const days = weekdays();
+      for (let c = 0; c < 7; c++) label(el, days[c], left + c * cw + 6, top - 34, "is-day");
+      for (let r = 0; r <= 6; r++) line(el, left, top + r * ch, d.w - left, top + r * ch, r === 0 || r === 6 ? "is-strong" : "");
+      for (let c = 0; c <= 7; c++) line(el, left + c * cw, top, left + c * cw, top + 6 * ch, c === 0 || c === 7 ? "is-strong" : "");
+    },
+  },
+  {
+    id: "habits",
+    label: "Habit tracker",
+    desc: "Habits on the left (one per line), 31 days to tick on the right.",
+    box: () => ({ left: LEFT - 60, width: 220, lines: 24 }),
+    draw: (el, d) => {
+      const x0 = LEFT - 60 + 230;
+      const cw = (d.w - 30 - x0) / 31;
+      for (let i = 0; i < 31; i++) {
+        const t = label(el, String(i + 1), x0 + i * cw, TEXT_TOP - 30, "is-num");
+        t.style.width = cw + "px";
+      }
+      for (let r = 0; r <= 24; r++) line(el, 30, TEXT_TOP + r * LINE, d.w - 30, TEXT_TOP + r * LINE, r === 0 ? "is-strong" : "");
+      for (let i = 0; i <= 31; i++) line(el, x0 + i * cw, TEXT_TOP, x0 + i * cw, TEXT_TOP + 24 * LINE, i === 0 ? "is-strong" : "is-faint");
+    },
+  },
+  {
+    id: "exams",
+    label: "Practice exam tracker",
+    desc: "One row per practice exam: subjects and total net.",
+    box: (d) => ({ left: 40, width: d.w - 80, lines: d.lines }),
+    draw: (el, d) => {
+      const cols = ["Exam", "Turkish", "Social", "Maths", "Science", "Total net"];
+      const x = [30, 190, 310, 430, 550, 670, d.w - 30];
+      cols.forEach((c, i) => label(el, T(c), x[i] + 8, TEXT_TOP - 34, "is-day"));
+      for (const xi of x) line(el, xi, TEXT_TOP - 8, xi, TEXT_TOP + d.lines * LINE, xi === x[0] || xi === x[6] ? "is-strong" : "");
+      line(el, 30, TEXT_TOP - 8, d.w - 30, TEXT_TOP - 8, "is-strong");
+    },
+  },
+  {
+    id: "reading",
+    label: "Reading list",
+    desc: "Book, author, pages and a box to tick when done.",
+    box: (d) => ({ left: 40, width: d.w - 80, lines: d.lines }),
+    draw: (el, d) => {
+      const cols = ["Book", "Author", "Page count", "Finished"];
+      const x = [30, 380, 610, 700, d.w - 30];
+      cols.forEach((c, i) => label(el, T(c), x[i] + 8, TEXT_TOP - 34, "is-day"));
+      for (const xi of x) line(el, xi, TEXT_TOP - 8, xi, TEXT_TOP + d.lines * LINE, xi === x[0] || xi === x[4] ? "is-strong" : "");
+      line(el, 30, TEXT_TOP - 8, d.w - 30, TEXT_TOP - 8, "is-strong");
+    },
+  },
 ];
+
+/** Monday-first short weekday names in the date language. */
+function weekdays(): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < 7; i++) out.push(fmtDate(window.moment().isoWeekday(i + 1).format("YYYY-MM-DD"), "ddd"));
+  return out;
+}
 
 export function templateOf(id: string | undefined): TemplateDef | null {
   return TEMPLATES.find((t) => t.id === id) ?? null;

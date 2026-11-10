@@ -1,6 +1,6 @@
 {
   "name": "defter",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Paper notebooks for Obsidian: type in animated handwriting, draw and highlight with the mouse, on ruled pages stored as plain Markdown.",
   "private": true,
   "type": "module",

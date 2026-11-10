@@ -63,3 +63,11 @@ test("damaged blocks are reported, never guessed", async () => {
   data.ct = "AAAA" + data.ct.slice(4);
   await assert.rejects(unlockWithPassword(data, "pw"), /damaged/);
 });
+
+test("absurd iteration counts are refused, CRLF files are read", async () => {
+  const { session } = await createLock("pw", undefined, ITER);
+  const file = await sealNotebook(session, "defter-plugin: notebook", plain);
+  assert.throws(() => parseLocked(file.replace(/"iter":1000/, '"iter":999999999')), /damaged/);
+  const crlf = file.replace(/\n/g, "\r\n");
+  assert.equal((await unlockWithPassword(parseLocked(crlf).data, "pw")).text, plain);
+});

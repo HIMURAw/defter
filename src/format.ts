@@ -36,6 +36,8 @@ export interface Stroke {
   s?: ShapeKind;
   /** Pen kind; absent means a ballpoint. */
   y?: PenKind;
+  /** Stylus pressure per point (0–1), when drawn with a pressure-sensitive pen. */
+  q?: number[];
 }
 
 export type ObjectKind = "img" | "note" | "tex" | "tape" | "stamp";
@@ -115,6 +117,7 @@ function isStroke(s: unknown): s is Stroke {
     if (o.s === "poly" ? o.p.length < 6 : o.p.length !== 4) return false;
   }
   if (o.y !== undefined && !PENS.includes(o.y as PenKind)) return false;
+  if (o.q !== undefined && !(Array.isArray(o.q) && Array.isArray(o.p) && o.q.length === o.p.length / 2 && o.q.every((n) => typeof n === "number"))) return false;
   return (
     (o.t === "pen" || o.t === "hl") &&
     typeof o.c === "string" &&

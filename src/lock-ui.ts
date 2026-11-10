@@ -21,9 +21,10 @@ export class PasswordModal extends Modal {
     let hint = "";
     const error = this.contentEl.createDiv("defter-lock-error");
     const go = () => {
-      if (pw.length < 4) return error.setText(T("Use at least 4 characters."));
+      if (pw.length < 6) return error.setText(T("Use at least 6 characters."));
       if (pw !== again) return error.setText(T("The two passwords are not the same."));
-      if (hint && pw.toLowerCase().includes(hint.toLowerCase())) return error.setText(T("The hint must not contain the password."));
+      const h = hint.trim().toLowerCase();
+      if (h && (h.includes(pw.toLowerCase()) || pw.toLowerCase().includes(h))) return error.setText(T("The hint must not contain the password."));
       this.close();
       this.done(pw, hint.trim());
     };
@@ -79,6 +80,10 @@ export class RecoveryModal extends Modal {
       new Notice(T("Recovery key copied. Keep it somewhere safe, outside this vault."));
     };
     c.createEl("p", { cls: "defter-lock-note", text: T("Write it on paper or keep it in a password manager. Do not keep it in this vault.") });
+    c.createEl("p", {
+      cls: "defter-lock-note",
+      text: T("Older plain copies may still exist in File recovery, Sync version history or Git. Delete them there if they matter."),
+    });
     if (this.warning) c.createEl("p", { cls: "defter-lock-note", text: this.warning });
     let ok = false;
     let btn: ButtonComponent;

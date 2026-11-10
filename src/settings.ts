@@ -1,7 +1,8 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import { getProp, type PageObject, type Stroke } from "./format";
 import type { CardState } from "./cards";
-import { LANGUAGES, T, setLanguage } from "./i18n";
+import type { PenSoundKind } from "./sound";
+import { LANGUAGES, T, language, setLanguage } from "./i18n";
 
 /** A drawing saved for reuse, stored with its top-left corner at 0,0. */
 export interface Sticker {
@@ -14,9 +15,11 @@ export interface Sticker {
 
 export type SpreadMode = "auto" | "single" | "spread";
 
-export type Paper = "ruled" | "grid" | "dots" | "blank";
-export type Tone = "cream" | "white" | "dark";
-export type FontId = "caveat" | "kalam" | "patrick" | "shantell";
+export type Paper = "ruled" | "grid" | "dots" | "blank" | "music" | "eng";
+export type Tone = "cream" | "white" | "dark" | "kraft" | "aged";
+export type FontId = "caveat" | "kalam" | "patrick" | "shantell" | "custom";
+export type Binding = "none" | "spiral" | "stitched";
+export type CoverStyle = "plain" | "leather" | "cloth" | "kraft";
 export type SizeId = "small" | "medium" | "large";
 export type AnimSpeed = "off" | "fast" | "normal" | "slow";
 export type PageSize = "a4" | "b5" | "a5" | "square";
@@ -35,6 +38,7 @@ export interface FontDef {
   weight: number;
 }
 
+/** Fonts to choose from; "My handwriting" is added when the user loaded one. */
 export const FONTS: FontDef[] = [
   { id: "caveat", label: "Caveat", family: "Defter Caveat", weight: 500 },
   { id: "kalam", label: "Kalam", family: "Defter Kalam", weight: 400 },
@@ -47,12 +51,29 @@ export const PAPERS: { id: Paper; label: string }[] = [
   { id: "grid", label: "Grid" },
   { id: "dots", label: "Dots" },
   { id: "blank", label: "Blank" },
+  { id: "music", label: "Music staff" },
+  { id: "eng", label: "Engineering" },
+];
+
+export const BINDINGS: { id: Binding; label: string }[] = [
+  { id: "none", label: "None" },
+  { id: "spiral", label: "Spiral" },
+  { id: "stitched", label: "Stitched" },
+];
+
+export const COVER_STYLES: { id: CoverStyle; label: string }[] = [
+  { id: "plain", label: "Plain" },
+  { id: "leather", label: "Leather" },
+  { id: "cloth", label: "Cloth" },
+  { id: "kraft", label: "Kraft" },
 ];
 
 export const TONES: { id: Tone; label: string }[] = [
   { id: "cream", label: "Cream" },
   { id: "white", label: "White" },
   { id: "dark", label: "Dark" },
+  { id: "kraft", label: "Kraft" },
+  { id: "aged", label: "Aged paper" },
 ];
 
 export const SIZES: { id: SizeId; label: string; scale: number }[] = [
@@ -115,6 +136,14 @@ export interface DefterSettings {
   spread: SpreadMode;
   /** Interface language: "auto" follows Obsidian. */
   language: string;
+  binding: Binding;
+  penSound: PenSoundKind;
+  penVolume: number;
+  /** The first-run tour was shown. */
+  welcomed: boolean;
+  /** Your own handwriting font: file name in the plugin folder, and its display name. */
+  customFont: string;
+  customFontName: string;
   /** Maths: \\sqrt → √, <= → ≤ while typing. */
   mathShortcuts: boolean;
   /** Maths: Tab after "12*3 =" writes the result. */
@@ -145,6 +174,12 @@ export const DEFAULT_SETTINGS: DefterSettings = {
   pageTurn: true,
   spread: "auto",
   language: "auto",
+  binding: "none",
+  welcomed: false,
+  penSound: "off",
+  penVolume: 0.6,
+  customFont: "",
+  customFontName: "",
   mathShortcuts: true,
   calculator: true,
   showPrivate: false,
@@ -172,12 +207,14 @@ export function setDateLocale(l: string) {
 export function fmtDate(day: string, format: string): string {
   const m = window.moment(day, "YYYY-MM-DD");
   if (!m.isValid()) return day;
-  if (dateLocale) m.locale(dateLocale);
+  // Not set: dates follow the interface language (English follows Obsidian).
+  const loc = dateLocale || (language() !== "en" ? language() : "");
+  if (loc) m.locale(loc);
   return m.format(format);
 }
 
 export const DATE_LOCALES: [string, string][] = [
-  ["", "Same as Obsidian"],
+  ["", "Same as the interface"],
   ["en", "English"],
   ["tr", "Türkçe"],
   ["de", "Deutsch"],
@@ -186,6 +223,8 @@ export const DATE_LOCALES: [string, string][] = [
 ];
 
 export interface NotebookLook {
+  binding: Binding;
+  coverStyle: CoverStyle;
   page: PageSize;
   paper: Paper;
   tone: Tone;
@@ -205,6 +244,8 @@ export function resolveLook(frontmatter: string, name: string, s: DefterSettings
   const ink = getProp(frontmatter, "defter-ink");
   const cover = getProp(frontmatter, "defter-cover");
   return {
+    binding: pick(getProp(frontmatter, "defter-binding"), BINDINGS.map((b) => b.id), s.binding),
+    coverStyle: pick(getProp(frontmatter, "defter-cover-style"), COVER_STYLES.map((c) => c.id), "plain"),
     page: pick(getProp(frontmatter, "defter-page"), PAGE_SIZES.map((p) => p.id), s.page),
     paper: pick(getProp(frontmatter, "defter-paper"), PAPERS.map((p) => p.id), s.paper),
     tone: pick(getProp(frontmatter, "defter-tone"), TONES.map((t) => t.id), s.tone),
@@ -220,6 +261,9 @@ export interface SettingsHost {
   settings: DefterSettings;
   saveSettings(): Promise<void>;
   refreshViews(): void;
+  loadCustomFont(file: File): Promise<void>;
+  showWelcome(): void;
+  removeCustomFont(): Promise<void>;
 }
 
 export class DefterSettingTab extends PluginSettingTab {
@@ -250,6 +294,10 @@ export class DefterSettingTab extends PluginSettingTab {
           this.display();
         });
       });
+    new Setting(containerEl)
+      .setName(T("Welcome tour"))
+      .setDesc(T("A short tour and a welcome notebook that shows every feature."))
+      .addButton((b) => b.setButtonText(T("Show the tour")).onClick(() => this.host.showWelcome()));
     containerEl.createEl("p", {
       text: T("Defaults for notebooks. Each notebook can override these from its own settings (the sliders icon in the notebook header)."),
       cls: "setting-item-description",
@@ -267,10 +315,42 @@ export class DefterSettingTab extends PluginSettingTab {
       for (const t of TONES) d.addOption(t.id, T(t.label));
       d.setValue(s.tone).onChange(async (v) => ((s.tone = v as Tone), await save()));
     });
+    new Setting(containerEl).setName(T("Binding")).addDropdown((d) => {
+      for (const b of BINDINGS) d.addOption(b.id, T(b.label));
+      d.setValue(s.binding).onChange(async (v) => ((s.binding = v as Binding), await save()));
+    });
     new Setting(containerEl).setName(T("Handwriting")).addDropdown((d) => {
       for (const f of FONTS) d.addOption(f.id, T(f.label));
       d.setValue(s.font).onChange(async (v) => ((s.font = v as FontId), await save()));
     });
+    const mine = new Setting(containerEl)
+      .setName(T("My handwriting font"))
+      .setDesc(
+        s.customFont
+          ? T("Loaded: {name}. Choose it as “Handwriting” here or in a notebook's settings.", { name: s.customFontName })
+          : T("Turn your own handwriting into a font (for example with calligraphr.com), then load the .ttf or .otf file here.")
+      );
+    if (s.customFont)
+      mine.addButton((b) =>
+        b.setButtonText(T("Remove")).onClick(async () => {
+          await this.host.removeCustomFont();
+          this.display();
+        })
+      );
+    mine.addButton((b) =>
+      b.setButtonText(T(s.customFont ? "Replace…" : "Load font file…")).onClick(() => {
+        const input = document.body.createEl("input", { type: "file", attr: { accept: ".ttf,.otf,.woff,.woff2" } });
+        input.style.display = "none";
+        input.onchange = async () => {
+          const f = input.files?.[0];
+          input.remove();
+          if (!f) return;
+          await this.host.loadCustomFont(f);
+          this.display();
+        };
+        input.click();
+      })
+    );
     new Setting(containerEl).setName(T("Text size")).addDropdown((d) => {
       for (const z of SIZES) d.addOption(z.id, T(z.label));
       d.setValue(s.size).onChange(async (v) => ((s.size = v as SizeId), await save()));
@@ -310,6 +390,15 @@ export class DefterSettingTab extends PluginSettingTab {
         d.addOption("0", T("Only when closed"));
         d.setValue(String(s.lockMinutes)).onChange(async (v) => ((s.lockMinutes = Number(v)), await save()));
       });
+
+    new Setting(containerEl)
+      .setName(T("Pen sound"))
+      .setDesc(T("A soft sound of pen on paper while you type and draw."))
+      .addDropdown((d) => {
+        d.addOption("off", T("Off")).addOption("pencil", T("Pencil")).addOption("fountain", T("Fountain pen"));
+        d.setValue(s.penSound).onChange(async (v) => ((s.penSound = v as PenSoundKind), await save()));
+      })
+      .addSlider((sl) => sl.setLimits(0.1, 1, 0.1).setValue(s.penVolume).setDynamicTooltip().onChange(async (v) => ((s.penVolume = v), await this.host.saveSettings())));
 
     new Setting(containerEl).setName(T("Pages")).setHeading();
     new Setting(containerEl)

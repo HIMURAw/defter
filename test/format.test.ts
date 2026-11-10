@@ -184,3 +184,11 @@ test("new pen kinds, shapes and objects are kept; unknown ones dropped", () => {
   const bad = '---\ndefter-plugin: notebook\n---\n\n<!-- defter:page -->\n\n\n<!-- defter:ink\n{"v":1,"pages":[\n[{"t":"pen","c":"#000","w":2,"p":[1,2],"y":"crayon"},{"t":"pen","c":"#000","w":2,"p":[1,2,3,4],"s":"poly"}]\n]}\n-->\n';
   assert.equal(parseNotebook(bad).pages[0].ink.length, 0);
 });
+
+test("stylus pressure is kept with its points, broken pressure lists are dropped", () => {
+  const nb = emptyNotebook();
+  nb.pages = [{ text: "", ink: [{ t: "pen", c: "#000", w: 2, p: [1, 2, 3, 4, 5, 6], q: [0.2, 0.5, 0.9] }] }];
+  assert.deepEqual(parseNotebook(serializeNotebook(nb)), nb);
+  const bad = '---\ndefter-plugin: notebook\n---\n\n<!-- defter:page -->\n\n\n<!-- defter:ink\n{"v":1,"pages":[\n[{"t":"pen","c":"#000","w":2,"p":[1,2,3,4],"q":[0.5]}]\n]}\n-->\n';
+  assert.equal(parseNotebook(bad).pages[0].ink.length, 0);
+});
