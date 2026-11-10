@@ -6,6 +6,7 @@ import { renderObject } from "./objects";
 import { fmtDate } from "./settings";
 import { TEXT_TOP, LINE, type PageDims } from "./render";
 import { defaultBox, templateOf, type TextBox } from "./templates";
+import { T } from "./i18n";
 
 export function pageBox(page: Page, d: PageDims): TextBox {
   return templateOf(page.tpl)?.box(d) ?? defaultBox(d);
@@ -23,7 +24,7 @@ export function drawDecor(app: App, layer: HTMLElement, page: Page, d: PageDims,
   if (page.bg) {
     const f = app.vault.getAbstractFileByPath(page.bg);
     if (f instanceof TFile) layer.createEl("img", { cls: "defter-bg", attr: { src: app.vault.getResourcePath(f), draggable: "false" } });
-    else layer.createDiv({ cls: "defter-obj-missing defter-bg", text: "Missing page background: " + page.bg });
+    else layer.createDiv({ cls: "defter-obj-missing defter-bg", text: T("Missing page background: ") + page.bg });
   }
   templateOf(page.tpl)?.draw(layer, d, title);
   if (page.date) {

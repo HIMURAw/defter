@@ -1,6 +1,7 @@
 import { Modal, type App } from "obsidian";
 import { grade, type Card, type CardState, type Grade } from "./cards";
 import { todayStr } from "./new-notebook";
+import { T } from "./i18n";
 
 export interface StudyItem {
   card: Card;
@@ -73,13 +74,13 @@ export class StudyModal extends Modal {
   private render() {
     const { contentEl } = this;
     contentEl.empty();
-    this.titleEl.setText(`Study cards · ${this.done} / ${this.total}`);
+    this.titleEl.setText(T("Study cards · {done} / {total}", { done: this.done, total: this.total }));
     const item = this.queue[0];
     if (!item) {
-      contentEl.createDiv({ cls: "defter-study-done", text: this.total ? "All done for today." : "No cards are due." });
+      contentEl.createDiv({ cls: "defter-study-done", text: T(this.total ? "All done for today." : "No cards are due.") });
       contentEl.createDiv({
         cls: "defter-study-hint",
-        text: "Cards come back after 1, 2, 4, 8 and 16 days as you know them better.",
+        text: T("Cards come back after 1, 2, 4, 8 and 16 days as you know them better."),
       });
       return;
     }
@@ -90,19 +91,19 @@ export class StudyModal extends Modal {
       card.createDiv({ cls: "defter-study-back", text: item.card.back });
     }
     const src = contentEl.createDiv("defter-study-src");
-    const link = src.createEl("a", { text: `${item.notebook}, page ${item.card.page + 1}` });
+    const link = src.createEl("a", { text: T("{notebook}, page {n}", { notebook: item.notebook, n: item.card.page + 1 }) });
     link.onclick = () => {
       this.close();
       this.host.openAt(item.path, item.card.page);
     };
     const row = contentEl.createDiv("defter-study-buttons");
     if (!this.shown) {
-      const b = row.createEl("button", { cls: "mod-cta", text: "Show answer (Space)" });
+      const b = row.createEl("button", { cls: "mod-cta", text: T("Show answer (Space)") });
       b.onclick = () => this.reveal();
       return;
     }
     const btn = (label: string, key: string, g: Grade, cls: string) => {
-      const b = row.createEl("button", { cls, text: `${label} (${key})` });
+      const b = row.createEl("button", { cls, text: `${T(label)} (${key})` });
       b.onclick = () => this.answer(g);
     };
     btn("Again", "1", "again", "mod-warning");

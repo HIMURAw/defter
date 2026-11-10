@@ -1,6 +1,7 @@
 import { Modal, Setting, TFolder, normalizePath, type App } from "obsidian";
 import { emptyNotebook, serializeNotebook, setProp } from "./format";
 import { COVERS, PAGE_SIZES, PAPERS, defaultCover, type DefterSettings } from "./settings";
+import { T } from "./i18n";
 
 export function todayStr(): string {
   return window.moment().format("YYYY-MM-DD");
@@ -27,8 +28,8 @@ export class NewNotebookModal extends Modal {
 
   onOpen() {
     this.modalEl.addClass("defter-settings-modal");
-    this.titleEl.setText(this.journal ? "New journal" : "New notebook");
-    let name = this.journal ? "Journal" : "";
+    this.titleEl.setText(T(this.journal ? "New journal" : "New notebook"));
+    let name = this.journal ? T("Journal") : "";
     let folder = this.folder.path;
     let page = this.settings.page as string;
     let paper = this.settings.paper as string;
@@ -36,14 +37,14 @@ export class NewNotebookModal extends Modal {
     let journal = this.journal;
     const { contentEl } = this;
 
-    new Setting(contentEl).setName("Name").addText((t) => {
-      t.setPlaceholder("e.g. Matematik").setValue(name).onChange((v) => (name = v));
+    new Setting(contentEl).setName(T("Name")).addText((t) => {
+      t.setPlaceholder(T("e.g. Matematik")).setValue(name).onChange((v) => (name = v));
       t.inputEl.addEventListener("keydown", (e) => e.key === "Enter" && void create());
       setTimeout(() => t.inputEl.focus(), 0);
     });
     new Setting(contentEl)
-      .setName("Journal")
-      .setDesc("One page per day; opens on today's page with the date written at the top.")
+      .setName(T("Journal"))
+      .setDesc(T("One page per day; opens on today's page with the date written at the top."))
       .addToggle((t) => t.setValue(journal).onChange((v) => (journal = v)));
     const folders = this.app.vault
       .getAllLoadedFiles()
@@ -51,27 +52,27 @@ export class NewNotebookModal extends Modal {
       .map((f) => f.path)
       .sort((a, b) => a.localeCompare(b, "tr"));
     new Setting(contentEl)
-      .setName("Bookcase")
-      .setDesc("The folder the notebook is saved in.")
+      .setName(T("Bookcase"))
+      .setDesc(T("The folder the notebook is saved in."))
       .addDropdown((d) => {
-        for (const p of folders) d.addOption(p, p === "/" ? "Vault (top level)" : p);
+        for (const p of folders) d.addOption(p, p === "/" ? T("Vault (top level)") : p);
         d.setValue(folder).onChange((v) => (folder = v));
       });
-    new Setting(contentEl).setName("Page size").addDropdown((d) => {
-      for (const p of PAGE_SIZES) d.addOption(p.id, p.label);
+    new Setting(contentEl).setName(T("Page size")).addDropdown((d) => {
+      for (const p of PAGE_SIZES) d.addOption(p.id, T(p.label));
       d.setValue(page).onChange((v) => (page = v));
     });
-    new Setting(contentEl).setName("Paper").addDropdown((d) => {
-      for (const p of PAPERS) d.addOption(p.id, p.label);
+    new Setting(contentEl).setName(T("Paper")).addDropdown((d) => {
+      for (const p of PAPERS) d.addOption(p.id, T(p.label));
       d.setValue(paper).onChange((v) => (paper = v));
     });
-    const coverRow = new Setting(contentEl).setName("Cover").controlEl;
+    const coverRow = new Setting(contentEl).setName(T("Cover")).controlEl;
     coverRow.addClass("defter-set-row");
     const drawCovers = () => {
       coverRow.empty();
       const current = cover || defaultCover(name || "Untitled");
       for (const c of COVERS) {
-        const b = coverRow.createEl("button", { cls: "defter-swatch defter-swatch-lg defter-swatch-cover", attr: { "aria-label": "Cover colour" } });
+        const b = coverRow.createEl("button", { cls: "defter-swatch defter-swatch-lg defter-swatch-cover", attr: { "aria-label": T("Cover colour") } });
         b.style.setProperty("--swatch", c);
         b.toggleClass("is-active", c === current);
         b.onclick = () => {
@@ -83,7 +84,7 @@ export class NewNotebookModal extends Modal {
     drawCovers();
 
     const create = async () => {
-      const base = (name.trim() || (journal ? "Journal" : "Untitled notebook")).replace(/[\\/:*?"<>|#^[\]]/g, "");
+      const base = (name.trim() || T(journal ? "Journal" : "Untitled notebook")).replace(/[\\/:*?"<>|#^[\]]/g, "");
       const dir = folder === "/" ? "" : folder + "/";
       let file = base;
       for (let i = 2; this.app.vault.getAbstractFileByPath(normalizePath(`${dir}${file}.md`)); i++) file = `${base} ${i}`;
@@ -100,7 +101,7 @@ export class NewNotebookModal extends Modal {
       this.close();
       this.done(path);
     };
-    new Setting(contentEl).addButton((b) => b.setButtonText("Create").setCta().onClick(() => void create()));
+    new Setting(contentEl).addButton((b) => b.setButtonText(T("Create")).setCta().onClick(() => void create()));
   }
 
   onClose() {
@@ -131,9 +132,9 @@ export class CalendarModal extends Modal {
     contentEl.empty();
     this.titleEl.setText(this.month.format("MMMM YYYY"));
     const nav = contentEl.createDiv("defter-cal-nav");
-    const prev = nav.createEl("button", { text: "‹" });
-    const today = nav.createEl("button", { text: "Today" });
-    const next = nav.createEl("button", { text: "›" });
+    const prev = nav.createEl("button", { text: T("‹") });
+    const today = nav.createEl("button", { text: T("Today") });
+    const next = nav.createEl("button", { text: T("›") });
     prev.onclick = () => ((this.month = this.month.clone().subtract(1, "month")), this.render());
     next.onclick = () => ((this.month = this.month.clone().add(1, "month")), this.render());
     today.onclick = () => {

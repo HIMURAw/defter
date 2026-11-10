@@ -43,6 +43,16 @@ export function parseCards(pages: { text: string }[]): Card[] {
   return out;
 }
 
+/** Short stable key for a card (FNV-1a), so card text is not stored in settings. */
+export function cardKey(front: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < front.length; i++) {
+    h ^= front.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return "c" + h.toString(36);
+}
+
 export function addDays(day: string, n: number): string {
   const [y, m, d] = day.split("-").map(Number);
   const t = new Date(Date.UTC(y, m - 1, d + n));

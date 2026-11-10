@@ -1,6 +1,7 @@
 import { ItemView, Menu, Modal, Notice, Setting, TFile, TFolder, debounce, moment, normalizePath, setIcon, setTooltip, type App, type WorkspaceLeaf } from "obsidian";
 import { COVERS, defaultCover } from "./settings";
 import { fmtMinutes, weekMinutes } from "./timer";
+import { T } from "./i18n";
 
 export const SHELF_VIEW = "defter-shelf";
 
@@ -11,7 +12,9 @@ export interface ShelfHost {
     caseOrder: string[];
     bookOrder: Record<string, string[]>;
     study: Record<string, Record<string, number>>;
+    showPrivate: boolean;
   };
+  isPrivate(f: TFile): boolean;
   saveSettings(): Promise<void>;
   notebookFiles(): TFile[];
   openNotebook(file: TFile): void;
@@ -40,20 +43,20 @@ class PromptModal extends Modal {
     this.extra = extra;
   }
   onOpen() {
-    this.titleEl.setText(this.title);
+    this.titleEl.setText(T(this.title));
     let v = this.value;
     const submit = () => {
       if (!v.trim()) return;
       this.close();
       this.done(v.trim());
     };
-    new Setting(this.contentEl).setName("Name").addText((t) => {
+    new Setting(this.contentEl).setName(T("Name")).addText((t) => {
       t.setValue(v).onChange((x) => (v = x));
       t.inputEl.addEventListener("keydown", (e) => e.key === "Enter" && submit());
       setTimeout(() => t.inputEl.select(), 0);
     });
     this.extra?.(this.contentEl);
-    new Setting(this.contentEl).addButton((b) => b.setButtonText("Save").setCta().onClick(submit));
+    new Setting(this.contentEl).addButton((b) => b.setButtonText(T("Save")).setCta().onClick(submit));
   }
   onClose() {
     this.contentEl.empty();
@@ -71,10 +74,10 @@ class ConfirmModal extends Modal {
     this.done = done;
   }
   onOpen() {
-    this.titleEl.setText("Are you sure?");
+    this.titleEl.setText(T("Are you sure?"));
     this.contentEl.createEl("p", { text: this.text });
     new Setting(this.contentEl)
-      .addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
+      .addButton((b) => b.setButtonText(T("Cancel")).onClick(() => this.close()))
       .addButton((b) =>
         b
           .setButtonText(this.action)
@@ -94,10 +97,10 @@ class CoverModal extends Modal {
     this.file = file;
   }
   onOpen() {
-    this.titleEl.setText(`Cover of “${this.file.basename}”`);
+    this.titleEl.setText(T("Cover of “{name}”", { name: this.file.basename }));
     const row = this.contentEl.createDiv("defter-set-row");
     for (const c of COVERS) {
-      const b = row.createEl("button", { cls: "defter-swatch defter-swatch-lg defter-swatch-cover", attr: { "aria-label": "Cover colour" } });
+      const b = row.createEl("button", { cls: "defter-swatch defter-swatch-lg defter-swatch-cover", attr: { "aria-label": T("Cover colour") } });
       b.style.setProperty("--swatch", c);
       b.onclick = async () => {
         await this.app.fileManager.processFrontMatter(this.file, (fm) => {
@@ -130,7 +133,7 @@ export class ShelfView extends ItemView {
     return SHELF_VIEW;
   }
   getDisplayText() {
-    return "Library";
+    return T("Library");
   }
   getIcon() {
     return "library";
@@ -181,22 +184,22 @@ export class ShelfView extends ItemView {
   private async render() {
     const root = this.contentEl;
     const scroll = root.scrollTop;
-    const files = this.host.notebookFiles();
+    const files = this.host.notebookFiles().filter((f) => this.host.settings.showPrivate || !this.host.isPrivate(f));
     const pages = new Map<TFile, number>();
     await Promise.all(files.map(async (f) => pages.set(f, ((await this.app.vault.cachedRead(f)).match(/^<!-- defter:page(?: [^\n>]*)? -->$/gm) ?? []).length || 1)));
 
     root.empty();
     const head = root.createDiv("defter-lib-head");
-    head.createEl("h2", { text: "Library" });
+    head.createEl("h2", { text: T("Library") });
     head.createSpan({ cls: "defter-lib-count", text: files.length === 1 ? "1 notebook" : `${files.length} notebooks` });
     const week = Object.values(this.host.settings.study).reduce((sum, days) => sum + weekMinutes(days), 0);
-    if (week) head.createSpan({ cls: "defter-lib-count defter-lib-week", text: `Studied this week: ${fmtMinutes(week)}` });
-    const add = head.createEl("button", { cls: "mod-cta", text: "New bookcase" });
+    if (week) head.createSpan({ cls: "defter-lib-count defter-lib-week", text: T("Studied this week: {time}", { time: fmtMinutes(week) }) });
+    const add = head.createEl("button", { cls: "mod-cta", text: T("New bookcase") });
     add.onclick = () => this.newBookcase();
 
     const cases = this.bookcases(files);
     if (!cases.length) {
-      root.createDiv({ cls: "defter-lib-empty", text: "No notebooks yet. Create a bookcase, then add notebooks to it." });
+      root.createDiv({ cls: "defter-lib-empty", text: T("No notebooks yet. Create a bookcase, then add notebooks to it.") });
       return;
     }
     cases.forEach((folder, ci) => this.renderCase(root, folder, this.orderedBooks(folder, files), pages, ci, cases));
@@ -207,9 +210,9 @@ export class ShelfView extends ItemView {
     const cabinet = root.createDiv("defter-case");
     const top = cabinet.createDiv("defter-case-top");
     const name = top.createDiv("defter-case-name");
-    name.createSpan({ text: folder.isRoot() ? "Vault" : folder.name });
+    name.createSpan({ text: folder.isRoot() ? T("Vault") : folder.name });
     if (folder.parent && !folder.parent.isRoot()) name.createSpan({ cls: "defter-case-path", text: folder.parent.path });
-    const more = top.createEl("button", { cls: "defter-case-more clickable-icon", attr: { "aria-label": "Bookcase options" } });
+    const more = top.createEl("button", { cls: "defter-case-more clickable-icon", attr: { "aria-label": T("Bookcase options") } });
     setIcon(more, "more-horizontal");
     more.onclick = (e) => this.caseMenu(e, folder, books.length, index, all);
 
@@ -218,7 +221,7 @@ export class ShelfView extends ItemView {
     for (const f of books) this.renderBook(inner, f, pages.get(f) ?? 1, folder);
 
     const plus = inner.createEl("button", { cls: "defter-spine defter-spine-new" });
-    setTooltip(plus, "New notebook here");
+    setTooltip(plus, T("New notebook here"));
     setIcon(plus, "plus");
     plus.onclick = () => this.host.newNotebook(folder);
 
@@ -248,10 +251,14 @@ export class ShelfView extends ItemView {
     book.style.setProperty("--h", 150 + (h % 5) * 9 + "px");
     book.toggleClass("has-bands", h % 3 !== 0);
     book.createDiv({ cls: "defter-spine-title", text: f.basename });
+    if (this.host.isPrivate(f)) {
+      book.addClass("is-private");
+      setIcon(book.createDiv("defter-spine-lock"), "lock");
+    }
     const week = weekMinutes(this.host.settings.study[f.path]);
     setTooltip(
       book,
-      `${f.basename} · ${n} ${n === 1 ? "page" : "pages"} · ${moment(f.stat.mtime).fromNow()}` + (week ? ` · this week ${fmtMinutes(week)}` : ""),
+      `${f.basename} · ${T(n === 1 ? "{n} page" : "{n} pages", { n })} · ${moment(f.stat.mtime).fromNow()}` + (week ? " · " + T("this week {time}", { time: fmtMinutes(week) }) : ""),
       { placement: "top" }
     );
     if (week) book.createDiv("defter-study-dot");
@@ -296,7 +303,7 @@ export class ShelfView extends ItemView {
     if ((file.parent?.path ?? "/") !== folder.path) {
       const dest = normalizePath(`${folder.isRoot() ? "" : folder.path + "/"}${file.name}`);
       if (this.app.vault.getAbstractFileByPath(dest)) {
-        new Notice(`“${folder.name}” already has a notebook named “${file.basename}”.`);
+        new Notice(T("“{folder}” already has a notebook named “{name}”.", { folder: folder.name, name: file.basename }));
         return;
       }
       await this.app.fileManager.renameFile(file, dest);
@@ -313,12 +320,12 @@ export class ShelfView extends ItemView {
 
   private bookMenu(e: MouseEvent, f: TFile, folder: TFolder) {
     const menu = new Menu();
-    menu.addItem((i) => i.setTitle("Open").setIcon("book-open").onClick(() => this.host.openNotebook(f)));
+    menu.addItem((i) => i.setTitle(T("Open")).setIcon("book-open").onClick(() => this.host.openNotebook(f)));
     menu.addItem((i) =>
-      i.setTitle("Rename").setIcon("pencil").onClick(() =>
+      i.setTitle(T("Rename")).setIcon("pencil").onClick(() =>
         new PromptModal(this.app, "Rename notebook", f.basename, async (v) => {
           const dest = normalizePath(`${f.parent && !f.parent.isRoot() ? f.parent.path + "/" : ""}${v}.md`);
-          if (this.app.vault.getAbstractFileByPath(dest)) return new Notice("A note with that name already exists.");
+          if (this.app.vault.getAbstractFileByPath(dest)) return new Notice(T("A note with that name already exists."));
           const order = this.host.settings.bookOrder[folder.path];
           const idx = order?.indexOf(f.name) ?? -1;
           await this.app.fileManager.renameFile(f, dest);
@@ -327,13 +334,13 @@ export class ShelfView extends ItemView {
         }).open()
       )
     );
-    menu.addItem((i) => i.setTitle("Cover colour").setIcon("palette").onClick(() => new CoverModal(this.app, f).open()));
+    menu.addItem((i) => i.setTitle(T("Cover colour")).setIcon("palette").onClick(() => new CoverModal(this.app, f).open()));
     menu.addSeparator();
     for (const target of this.bookcases(this.host.notebookFiles())) {
       if (target === folder) continue;
       menu.addItem((i) =>
         i
-          .setTitle(`Move to ${target.isRoot() ? "Vault" : target.name}`)
+          .setTitle(T("Move to {place}", { place: target.isRoot() ? T("Vault") : target.name }))
           .setIcon("folder-input")
           .setSection("move")
           .onClick(() => void this.place(f, target, null, false))
@@ -342,11 +349,11 @@ export class ShelfView extends ItemView {
     menu.addSeparator();
     menu.addItem((i) =>
       i
-        .setTitle("Delete notebook")
+        .setTitle(T("Delete notebook"))
         .setIcon("trash-2")
         .setWarning(true)
         .onClick(() =>
-          new ConfirmModal(this.app, `“${f.basename}” will be moved to the trash.`, "Delete", () => void this.app.fileManager.trashFile(f)).open()
+          new ConfirmModal(this.app, T("“{name}” will be moved to the trash.", { name: f.basename }), T("Delete"), () => void this.app.fileManager.trashFile(f)).open()
         )
     );
     menu.showAtMouseEvent(e);
@@ -364,13 +371,13 @@ export class ShelfView extends ItemView {
       await this.host.saveSettings();
       this.refresh();
     };
-    menu.addItem((i) => i.setTitle("New notebook here").setIcon("plus").onClick(() => this.host.newNotebook(folder)));
+    menu.addItem((i) => i.setTitle(T("New notebook here")).setIcon("plus").onClick(() => this.host.newNotebook(folder)));
     if (!folder.isRoot()) {
       menu.addItem((i) =>
-        i.setTitle("Rename bookcase").setIcon("pencil").onClick(() =>
+        i.setTitle(T("Rename bookcase")).setIcon("pencil").onClick(() =>
           new PromptModal(this.app, "Rename bookcase", folder.name, async (v) => {
             const dest = normalizePath(`${folder.parent && !folder.parent.isRoot() ? folder.parent.path + "/" : ""}${v}`);
-            if (this.app.vault.getAbstractFileByPath(dest)) return new Notice("A folder with that name already exists.");
+            if (this.app.vault.getAbstractFileByPath(dest)) return new Notice(T("A folder with that name already exists."));
             const old = folder.path;
             await this.app.fileManager.renameFile(folder, dest);
             const swap = (p: string) => (p === old ? dest : p);
@@ -385,13 +392,13 @@ export class ShelfView extends ItemView {
         )
       );
     }
-    menu.addItem((i) => i.setTitle("Move up").setIcon("arrow-up").setDisabled(index === 0).onClick(() => void move(-1)));
-    menu.addItem((i) => i.setTitle("Move down").setIcon("arrow-down").setDisabled(index === all.length - 1).onClick(() => void move(1)));
+    menu.addItem((i) => i.setTitle(T("Move up")).setIcon("arrow-up").setDisabled(index === 0).onClick(() => void move(-1)));
+    menu.addItem((i) => i.setTitle(T("Move down")).setIcon("arrow-down").setDisabled(index === all.length - 1).onClick(() => void move(1)));
     if (count === 0 && !folder.isRoot()) {
       menu.addSeparator();
       menu.addItem((i) =>
         i
-          .setTitle("Remove bookcase")
+          .setTitle(T("Remove bookcase"))
           .setIcon("trash-2")
           .setWarning(true)
           .onClick(async () => {
@@ -425,10 +432,10 @@ export class ShelfView extends ItemView {
       },
       (el) =>
         new Setting(el)
-          .setName("Inside folder")
-          .setDesc("The bookcase is a folder; its notebooks are the notes in it.")
+          .setName(T("Inside folder"))
+          .setDesc(T("The bookcase is a folder; its notebooks are the notes in it."))
           .addDropdown((d) => {
-            d.addOption("/", "Vault (top level)");
+            d.addOption("/", T("Vault (top level)"));
             for (const f of folders) if (!f.isRoot()) d.addOption(f.path, f.path);
             d.setValue(parent).onChange((v) => (parent = v));
           })

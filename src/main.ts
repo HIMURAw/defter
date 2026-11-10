@@ -1,4 +1,4 @@
-import { MarkdownView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, debounce, normalizePath, type ViewState } from "obsidian";
+import { FuzzySuggestModal, MarkdownView, Notice, type App, Plugin, TFile, TFolder, WorkspaceLeaf, debounce, normalizePath, type ViewState } from "obsidian";
 import { DefterView, VIEW_TYPE, type DefterHost } from "./view";
 import { FRONTMATTER_KEY, emptyNotebook, fromLegacy, isNotebookText, parseNotebook, serializeNotebook, type Notebook } from "./format";
 import { DefterSettingTab, freshSettings, setDateLocale, type DefterSettings, type NotebookLook } from "./settings";
@@ -8,6 +8,9 @@ import { NewNotebookModal, todayStr } from "./new-notebook";
 import { StudyTimer } from "./timer";
 import { isDue, parseCards, type CardState } from "./cards";
 import { StudyModal, type StudyItem } from "./study-modal";
+import { LOCK_KEY } from "./lock";
+import { cardKey } from "./cards";
+import { T, setLanguage } from "./i18n";
 
 const LEGACY_EXT = "defter";
 
@@ -22,9 +25,11 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
   async onload() {
     this.settings = freshSettings(await this.loadData());
     setDateLocale(this.settings.dateLocale);
+    setLanguage(this.settings.language);
     this.addSettingTab(new DefterSettingTab(this.app, this));
     this.timer = new StudyTimer(this, this.addStatusBarItem());
     this.registerInterval(window.setInterval(() => this.timer.tick(), 1000));
+    this.registerInterval(window.setInterval(() => this.autoLock(), 20_000));
     this.register(() => this.timer.stop());
 
     this.registerView(VIEW_TYPE, (leaf) => new DefterView(leaf, this));
@@ -35,23 +40,24 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
       this.reportLegacy();
     });
 
-    this.addRibbonIcon("library", "Open library", () => void this.openShelf());
+    this.addRibbonIcon("library", T("Open library"), () => void this.openShelf());
 
-    this.addCommand({ id: "open-shelf", name: "Open library", callback: () => void this.openShelf() });
+    this.addCommand({ id: "open-shelf", name: T("Open library"), callback: () => void this.openShelf() });
     this.addCommand({
       id: "new-notebook",
-      name: "New notebook",
+      name: T("New notebook"),
       callback: () => {
         const active = this.app.workspace.getActiveFile();
         this.newNotebook(active?.parent ?? this.app.vault.getRoot());
       },
     });
-    this.addCommand({ id: "open-journal", name: "Open today's journal page", callback: () => this.openJournal() });
-    this.addCommand({ id: "review-cards", name: "Study due flashcards in all notebooks", callback: () => void this.reviewAll() });
-    this.addCommand({ id: "stop-timer", name: "Stop the study timer", callback: () => this.timer.stop() });
+    this.addCommand({ id: "open-journal", name: T("Open today's journal page"), callback: () => this.openJournal() });
+    this.addCommand({ id: "review-cards", name: T("Study due flashcards in all notebooks"), callback: () => void this.reviewAll() });
+    this.addCommand({ id: "open-private", name: T("Open private notebook…"), callback: () => this.openPrivate() });
+    this.addCommand({ id: "stop-timer", name: T("Stop the study timer"), callback: () => this.timer.stop() });
     this.addCommand({
       id: "open-as-notebook",
-      name: "Open this note as a notebook",
+      name: T("Open this note as a notebook"),
       checkCallback: (checking) => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view?.file) return false;
@@ -61,7 +67,7 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
     });
     this.addCommand({
       id: "convert-old-notebooks",
-      name: "Convert old .defter notebooks to Markdown",
+      name: T("Convert old .defter notebooks to Markdown"),
       callback: () => void this.convertLegacy(),
     });
 
@@ -69,11 +75,11 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
       this.app.workspace.on("file-menu", (menu, target, _source, leaf) => {
         if (target instanceof TFolder) {
           menu.addItem((item) =>
-            item.setTitle("New notebook").setIcon("notebook-pen").onClick(() => this.newNotebook(target))
+            item.setTitle(T("New notebook")).setIcon("notebook-pen").onClick(() => this.newNotebook(target))
           );
         } else if (target instanceof TFile && target.extension === "md" && leaf?.view instanceof MarkdownView) {
           menu.addItem((item) =>
-            item.setTitle("Open as notebook").setIcon("notebook-pen").onClick(() => void this.openAsNotebook(leaf, target))
+            item.setTitle(T("Open as notebook")).setIcon("notebook-pen").onClick(() => void this.openAsNotebook(leaf, target))
           );
         }
       })
@@ -108,11 +114,12 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
   }
 
   cardState(path: string, front: string): CardState | undefined {
-    return this.settings.cards[path]?.[front];
+    return this.settings.cards[path]?.[cardKey(front)];
   }
 
   setCardState(path: string, front: string, state: CardState) {
-    (this.settings.cards[path] ??= {})[front] = state;
+    // Keyed by a hash: the card text itself never lands in the plugin settings.
+    (this.settings.cards[path] ??= {})[cardKey(front)] = state;
     this.saveSoon();
   }
 
@@ -136,6 +143,15 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
     await this.app.workspace.getLeaf(false).openFile(file);
   }
 
+  private openPrivate() {
+    const files = this.notebookFiles().filter((f) => this.isPrivate(f));
+    if (!files.length) {
+      new Notice(T("No private notebooks yet. Open a notebook and choose “Make private (password)…” in its ⋯ menu."));
+      return;
+    }
+    new PrivatePicker(this.app, files, (f) => this.openNotebook(f)).open();
+  }
+
   /** Due cards from every notebook, studied in one go. */
   async reviewAll() {
     const today = todayStr();
@@ -151,7 +167,7 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
       }
     }
     if (!items.length) {
-      new Notice("No flashcards are due. Write cards as “front :: back” lines in any notebook.");
+      new Notice(T("No flashcards are due. Write cards as “front :: back” lines in any notebook."));
       return;
     }
     new StudyModal(this.app, items, this).open();
@@ -180,6 +196,20 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
     return this.app.vault
       .getMarkdownFiles()
       .filter((f) => this.app.metadataCache.getFileCache(f)?.frontmatter?.[FRONTMATTER_KEY] === "notebook");
+  }
+
+  isPrivate(f: TFile): boolean {
+    return !!this.app.metadataCache.getFileCache(f)?.frontmatter?.[LOCK_KEY];
+  }
+
+  /** Locks open private notebooks nobody has touched for a while. */
+  private autoLock() {
+    const min = this.settings.lockMinutes;
+    if (!min) return;
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      const v = leaf.view as DefterView;
+      if (v.isPrivate && Date.now() - v.lastActive > min * 60_000) void v.lockNow();
+    }
   }
 
   newNotebook(folder: TFolder, journal = false) {
@@ -301,7 +331,7 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
 
   private reportLegacy() {
     const n = this.legacyFiles().length;
-    if (n) new Notice(`Defter: ${n} old .defter notebook(s) found. Run “Convert old .defter notebooks to Markdown” from the command palette.`, 10000);
+    if (n) new Notice(T("Defter: {n} old .defter notebook(s) found. Run “Convert old .defter notebooks to Markdown” from the command palette.", { n }), 10000);
   }
 
   // Each old file gets a Markdown twin; the original is kept as .defter.bak.
@@ -320,7 +350,27 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
         failed.push(`${f.path} (${(e as Error).message})`);
       }
     }
-    new Notice(`Defter: converted ${done} notebook(s).` + (failed.length ? ` Skipped: ${failed.join(", ")}` : ""), 10000);
+    new Notice(T("Defter: converted {n} notebook(s).", { n: done }) + (failed.length ? " " + T("Skipped: {list}", { list: failed.join(", ") }) : ""), 10000);
     return { done, failed };
+  }
+}
+
+class PrivatePicker extends FuzzySuggestModal<TFile> {
+  private files: TFile[];
+  private pick: (f: TFile) => void;
+  constructor(app: App, files: TFile[], pick: (f: TFile) => void) {
+    super(app);
+    this.files = files;
+    this.pick = pick;
+    this.setPlaceholder(T("Private notebook"));
+  }
+  getItems() {
+    return this.files;
+  }
+  getItemText(f: TFile) {
+    return f.basename;
+  }
+  onChooseItem(f: TFile) {
+    this.pick(f);
   }
 }

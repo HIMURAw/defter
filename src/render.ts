@@ -1,6 +1,7 @@
 // Drawing helpers shared by the notebook view and PDF export.
 import type { ShapeKind, Stroke } from "./format";
 import { inkFor, type FontDef, type Tone } from "./settings";
+import { SYMBOL_NAMES } from "./symbols";
 
 export const LINE = 36;
 export const TEXT_TOP = 72;
@@ -311,6 +312,7 @@ export function lineFormats(line: string): string[] {
     add(at + 1, at + 3, "cb");
     if (done) add(at + 4, line.length, "done");
   }
+  mathFormats(line, add);
   const card = line.indexOf(" :: ");
   if (card > 0 && !head) {
     add(card + 1, card + 3, "m");
@@ -329,6 +331,53 @@ export function lineFormats(line: string): string[] {
     }
   }
   return f;
+}
+
+/**
+ * Maths marks on a line: √(…) gets a bar over its contents, x^2 and a_1 are
+ * drawn small above/below (the ^ and _ fade away), and symbols the
+ * handwriting fonts lack are drawn by hand (see symbols.ts).
+ */
+function mathFormats(line: string, add: (from: number, to: number, flag: string) => void) {
+  for (let i = 0; i < line.length; i++) {
+    const name = SYMBOL_NAMES[line[i]];
+    if (name) add(i, i + 1, "sym sym-" + name);
+  }
+  // √( … ) and √x
+  for (let i = line.indexOf("√"); i !== -1; i = line.indexOf("√", i + 1)) {
+    if (line[i + 1] === "(") {
+      let depth = 0;
+      for (let k = i + 1; k < line.length; k++) {
+        if (line[k] === "(") depth++;
+        else if (line[k] === ")" && --depth === 0) {
+          add(i + 1, i + 2, "mh rad");
+          add(i + 2, k, "rad");
+          add(k, k + 1, "mh");
+          break;
+        }
+      }
+    } else {
+      const m = /^[0-9A-Za-zπ.,]+/.exec(line.slice(i + 1));
+      if (m) add(i + 1, i + 1 + m[0].length, "rad");
+    }
+  }
+  // Powers and indices: x^2, x^(n+1), x^-1, a_1, a_(n)
+  for (const m of line.matchAll(/(?<=[0-9A-Za-zπ)²³\]])([\^_])(\((?:[^()]|\([^()]*\))*\)|-?[0-9A-Za-zπ]+)/g)) {
+    const at = m.index!;
+    const kind = m[1] === "^" ? "sup" : "sub";
+    // snake_case words stay words: an index is a number, one letter or (…).
+    if (kind === "sub" && /^[A-Za-z]{2,}/.test(m[2])) continue;
+    add(at, at + 1, "mh");
+    let from = at + 1;
+    let to = at + 1 + m[2].length;
+    if (m[2].startsWith("(")) {
+      add(from, from + 1, "mh");
+      add(to - 1, to, "mh");
+      from++;
+      to--;
+    }
+    add(from, to, kind);
+  }
 }
 
 /** Range of the "[ ]" checkbox on the line holding `pos`, when the click is on it. */

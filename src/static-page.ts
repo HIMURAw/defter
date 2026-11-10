@@ -40,6 +40,7 @@ export function renderStaticPage(app: App, root: HTMLElement, title: string, pag
       const span = mirror.createSpan({ text: line[i] });
       span.style.top = wobble(line[i], i ? line[i - 1] : "\n") + "px";
       if (flags[i]) span.dataset.f = flags[i];
+      if (/\b(sup|sub)\b/.test(flags[i])) span.dataset.c = line[i];
     }
     mirror.appendText("\n");
   }

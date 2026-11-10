@@ -2,6 +2,7 @@ import { Modal, type App } from "obsidian";
 import { COVERS, FONTS, INKS, PAGE_SIZES, PAPERS, SIZES, TONES, inkFor } from "./settings";
 import { getProp } from "./format";
 import type { DefterView } from "./view";
+import { T } from "./i18n";
 
 const SAMPLE = "Türev ve İntegral: ağaç, şeker, ılık";
 
@@ -15,7 +16,7 @@ export class NotebookSettingsModal extends Modal {
 
   onOpen() {
     this.modalEl.addClass("defter-settings-modal");
-    this.titleEl.setText("Notebook settings");
+    this.titleEl.setText(T("Notebook settings"));
     this.render();
   }
 
@@ -30,7 +31,7 @@ export class NotebookSettingsModal extends Modal {
 
   private section(title: string) {
     const s = this.contentEl.createDiv("defter-set-section");
-    s.createDiv({ cls: "defter-set-title", text: title });
+    s.createDiv({ cls: "defter-set-title", text: T(title) });
     return s.createDiv("defter-set-row");
   }
 
@@ -41,7 +42,7 @@ export class NotebookSettingsModal extends Modal {
 
     const page = this.section("Page size");
     for (const p of PAGE_SIZES) {
-      const b = page.createEl("button", { cls: "defter-seg", text: p.label });
+      const b = page.createEl("button", { cls: "defter-seg", text: T(p.label) });
       b.toggleClass("is-active", look.page === p.id);
       b.onclick = () => this.set("defter-page", p.id);
     }
@@ -53,7 +54,7 @@ export class NotebookSettingsModal extends Modal {
       const sw = tile.createDiv("defter-tile-paper");
       sw.dataset.paper = p.id;
       sw.dataset.tone = look.tone;
-      tile.createSpan({ text: p.label });
+      tile.createSpan({ text: T(p.label) });
       tile.onclick = () => this.set("defter-paper", p.id);
     }
 
@@ -64,7 +65,7 @@ export class NotebookSettingsModal extends Modal {
       const sw = tile.createDiv("defter-tile-paper");
       sw.dataset.paper = look.paper;
       sw.dataset.tone = t.id;
-      tile.createSpan({ text: t.label });
+      tile.createSpan({ text: T(t.label) });
       tile.onclick = () => this.set("defter-tone", t.id);
     }
 
@@ -82,14 +83,14 @@ export class NotebookSettingsModal extends Modal {
 
     const size = this.section("Text size");
     for (const z of SIZES) {
-      const b = size.createEl("button", { cls: "defter-seg", text: z.label });
+      const b = size.createEl("button", { cls: "defter-seg", text: T(z.label) });
       b.toggleClass("is-active", Math.abs(look.scale - z.scale) < 0.001);
       b.onclick = () => this.set("defter-size", z.id);
     }
 
     const ink = this.section("Ink");
     for (const i of INKS) {
-      const b = ink.createEl("button", { cls: "defter-swatch defter-swatch-lg", attr: { "aria-label": i.label } });
+      const b = ink.createEl("button", { cls: "defter-swatch defter-swatch-lg", attr: { "aria-label": T(i.label) } });
       b.style.setProperty("--swatch", inkFor(i.id, look.tone));
       b.toggleClass("is-active", look.ink === i.id);
       b.onclick = () => this.set("defter-ink", i.id);
@@ -97,15 +98,15 @@ export class NotebookSettingsModal extends Modal {
 
     const cover = this.section("Cover");
     for (const c of COVERS) {
-      const b = cover.createEl("button", { cls: "defter-swatch defter-swatch-lg defter-swatch-cover", attr: { "aria-label": "Cover colour" } });
+      const b = cover.createEl("button", { cls: "defter-swatch defter-swatch-lg defter-swatch-cover", attr: { "aria-label": T("Cover colour") } });
       b.style.setProperty("--swatch", c);
       b.toggleClass("is-active", look.cover === c);
       b.onclick = () => this.set("defter-cover", c);
     }
 
     const foot = contentEl.createDiv("defter-set-foot");
-    foot.createSpan({ cls: "defter-set-hint", text: "Saved in this notebook's properties. Defaults are in Settings → Defter." });
-    const reset = foot.createEl("button", { text: "Use defaults" });
+    foot.createSpan({ cls: "defter-set-hint", text: T("Saved in this notebook's properties. Defaults are in Settings → Defter.") });
+    const reset = foot.createEl("button", { text: T("Use defaults") });
     const keys = ["defter-page", "defter-paper", "defter-tone", "defter-font", "defter-size", "defter-ink", "defter-cover"];
     reset.disabled = !keys.some((k) => getProp(this.view.nb.frontmatter, k) !== null);
     reset.onclick = () => {

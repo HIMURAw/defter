@@ -3,6 +3,7 @@ import type { Notebook } from "./format";
 import { pageDims } from "./render";
 import type { NotebookLook } from "./settings";
 import { renderStaticPage } from "./static-page";
+import { T } from "./i18n";
 
 export interface Remote {
   getCurrentWebContents(): {
@@ -25,10 +26,10 @@ export function getRemote(): Remote | null {
 export async function exportPdf(app: App, title: string, nb: Notebook, look: NotebookLook) {
   const remote = getRemote();
   if (!remote) {
-    new Notice("PDF export needs the Obsidian desktop app.");
+    new Notice(T("PDF export needs the Obsidian desktop app."));
     return;
   }
-  const notice = new Notice("Preparing PDF…", 0);
+  const notice = new Notice(T("Preparing PDF…"), 0);
   // Obsidian's print stylesheet hides everything in <body> except ".print".
   const root = document.body.createDiv("print defter-print");
   try {
@@ -54,9 +55,9 @@ export async function exportPdf(app: App, title: string, nb: Notebook, look: Not
     if (res.canceled || !res.filePath) return;
     const fs = (window as unknown as { require: (m: string) => { writeFileSync(p: string, d: Uint8Array): void } }).require("fs");
     fs.writeFileSync(res.filePath, data);
-    new Notice(`Saved ${res.filePath}`);
+    new Notice(T("Saved {path}", { path: res.filePath }));
   } catch (e) {
-    new Notice("PDF export failed: " + (e as Error).message);
+    new Notice(T("PDF export failed: ") + (e as Error).message);
   } finally {
     document.body.removeClass("defter-printing");
     root.remove();

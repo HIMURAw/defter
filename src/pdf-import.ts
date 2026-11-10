@@ -1,6 +1,7 @@
 // Imports PDF pages as page backgrounds: each page is drawn once with
 // Obsidian's own pdf.js and saved as a picture next to the notebook.
 import { Modal, Notice, Setting, SuggestModal, TFile, loadPdfJs, type App } from "obsidian";
+import { T } from "./i18n";
 
 interface PdfSource {
   label: string;
@@ -12,7 +13,7 @@ class PdfPicker extends SuggestModal<PdfSource> {
   constructor(app: App, pick: (s: PdfSource) => void) {
     super(app);
     this.pick = pick;
-    this.setPlaceholder("Choose a PDF from the vault, or pick one from your computer");
+    this.setPlaceholder(T("Choose a PDF from the vault, or pick one from your computer"));
   }
   getSuggestions(q: string): PdfSource[] {
     const query = q.toLocaleLowerCase();
@@ -22,7 +23,7 @@ class PdfPicker extends SuggestModal<PdfSource> {
       .sort((a, b) => b.stat.mtime - a.stat.mtime)
       .slice(0, 50)
       .map((file) => ({ label: file.path, file }));
-    return [{ label: "From my computer…" }, ...files];
+    return [{ label: T("From my computer…") }, ...files];
   }
   renderSuggestion(s: PdfSource, el: HTMLElement) {
     el.setText(s.label);
@@ -44,28 +45,28 @@ class RangeModal extends Modal {
     this.done = done;
   }
   onOpen() {
-    this.titleEl.setText(`Import ${this.name}`);
+    this.titleEl.setText(T("Import {name}", { name: this.name }));
     let value = `1-${this.count}`;
     const go = () => {
       const pages = parseRange(value, this.count);
       if (!pages.length) {
-        new Notice("No pages in that range.");
+        new Notice(T("No pages in that range."));
         return;
       }
       this.close();
       this.done(pages);
     };
     new Setting(this.contentEl)
-      .setName("Pages")
-      .setDesc(`This PDF has ${this.count} pages. Examples: 1-5, 2, 7-9`)
+      .setName(T("Pages"))
+      .setDesc(T("This PDF has {n} pages. Examples: 1-5, 2, 7-9", { n: this.count }))
       .addText((t) => {
         t.setValue(value).onChange((v) => (value = v));
         t.inputEl.addEventListener("keydown", (e) => e.key === "Enter" && go());
         setTimeout(() => t.inputEl.select(), 0);
       });
     new Setting(this.contentEl)
-      .setDesc("Each PDF page becomes a notebook page you can write and draw on. The pages are saved as pictures next to the notebook.")
-      .addButton((b) => b.setButtonText("Import").setCta().onClick(go));
+      .setDesc(T("Each PDF page becomes a notebook page you can write and draw on. The pages are saved as pictures next to the notebook."))
+      .addButton((b) => b.setButtonText(T("Import")).setCta().onClick(go));
   }
   onClose() {
     this.contentEl.empty();
@@ -121,11 +122,11 @@ export function importPdf(app: App, notebook: TFile, done: (pages: ImportedPage[
       const doc = await pdfjs.getDocument({ data: new Uint8Array(data) }).promise;
       new RangeModal(app, name, doc.numPages, (pages) => {
         void (async () => {
-          const notice = new Notice("Importing…", 0);
+          const notice = new Notice(T("Importing…"), 0);
           const out: ImportedPage[] = [];
           try {
             for (const [k, n] of pages.entries()) {
-              notice.setMessage(`Importing page ${k + 1} of ${pages.length}…`);
+              notice.setMessage(T("Importing page {n} of {total}…", { n: k + 1, total: pages.length }));
               const page = await doc.getPage(n);
               const base = page.getViewport({ scale: 1 });
               // About 2× the notebook page width, so it stays sharp when zoomed in.
@@ -145,7 +146,7 @@ export function importPdf(app: App, notebook: TFile, done: (pages: ImportedPage[
             }
             done(out);
           } catch (e) {
-            new Notice("PDF import failed: " + (e as Error).message);
+            new Notice(T("PDF import failed: ") + (e as Error).message);
             if (out.length) done(out);
           } finally {
             notice.hide();
@@ -153,6 +154,6 @@ export function importPdf(app: App, notebook: TFile, done: (pages: ImportedPage[
           }
         })();
       }).open();
-    })().catch((e) => new Notice("Could not open the PDF: " + (e as Error).message));
+    })().catch((e) => new Notice(T("Could not open the PDF: ") + (e as Error).message));
   }).open();
 }

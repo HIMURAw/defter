@@ -2,6 +2,7 @@
 // minutes are added to the notebook the timer was started from.
 import { Menu, Notice } from "obsidian";
 import { todayStr } from "./new-notebook";
+import { T } from "./i18n";
 
 export type TimerMode = "pomo25" | "pomo50" | "free";
 
@@ -73,7 +74,7 @@ export class StudyTimer {
 
   start(mode: TimerMode, path: string, name: string) {
     this.run = { mode, path, name, phase: "focus", start: Date.now(), counted: 0 };
-    new Notice(mode === "free" ? `Stopwatch started for ${name}.` : `Focus for ${TIMER_MODES.find((m) => m.id === mode)!.focus} minutes. You can do it.`);
+    new Notice(mode === "free" ? T("Stopwatch started for {name}.", { name }) : T("Focus for {n} minutes. You can do it.", { n: TIMER_MODES.find((m) => m.id === mode)!.focus }));
     this.tick();
   }
 
@@ -109,10 +110,10 @@ export class StudyTimer {
         if (sec >= limit) {
           beep();
           if (r.phase === "focus") {
-            new Notice(`Well done: ${def.focus} minutes on ${r.name}. Take a ${def.rest} minute break.`, 8000);
+            new Notice(T("Well done: {n} minutes on {name}. Take a {rest} minute break.", { n: def.focus, name: r.name, rest: def.rest }), 8000);
             this.run = { ...r, phase: "rest", start: Date.now(), counted: 0 };
           } else {
-            new Notice("Break is over. Start the next round when you are ready.", 8000);
+            new Notice(T("Break is over. Start the next round when you are ready."), 8000);
             this.run = null;
           }
         }
@@ -141,13 +142,13 @@ export class StudyTimer {
   menu(e: MouseEvent, path?: string, name?: string) {
     const m = new Menu();
     if (this.run) {
-      m.addItem((i) => i.setTitle(`Stop timer (${this.run!.name})`).setIcon("square").onClick(() => this.stop()));
+      m.addItem((i) => i.setTitle(T("Stop timer ({name})", { name: this.run!.name })).setIcon("square").onClick(() => this.stop()));
     }
     if (path && name) {
       for (const def of TIMER_MODES) {
         m.addItem((i) =>
           i
-            .setTitle(def.label)
+            .setTitle(T(def.label))
             .setIcon(def.id === "free" ? "timer" : "alarm-clock")
             .setSection("start")
             .onClick(() => this.start(def.id, path, name))
@@ -166,6 +167,6 @@ export function weekMinutes(days: Record<string, number> | undefined): number {
 }
 
 export function fmtMinutes(min: number): string {
-  if (min < 60) return `${min} min`;
-  return `${Math.floor(min / 60)} h ${min % 60} min`;
+  if (min < 60) return T("{n} min", { n: min });
+  return T("{h} h {m} min", { h: Math.floor(min / 60), m: min % 60 });
 }

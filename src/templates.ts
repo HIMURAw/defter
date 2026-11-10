@@ -1,6 +1,7 @@
 // Page templates: a few guide lines and labels drawn on the paper, and the
 // part of the page where typed text goes.
 import { LINE, TEXT_TOP, type PageDims } from "./render";
+import { T } from "./i18n";
 
 export interface TextBox {
   left: number;
@@ -48,9 +49,9 @@ export const TEMPLATES: TemplateDef[] = [
       const bottom = TEXT_TOP + (d.lines - 5) * LINE;
       line(el, cue, 40, cue, bottom, "is-strong");
       line(el, 24, bottom, d.w - 24, bottom, "is-strong");
-      label(el, "Cues", 30, 34);
-      label(el, "Notes", cue + 16, 34);
-      label(el, "Summary", 30, bottom + 8);
+      label(el, T("Cues"), 30, 34);
+      label(el, T("Notes"), cue + 16, 34);
+      label(el, T("Summary"), 30, bottom + 8);
     },
   },
   {
@@ -61,8 +62,8 @@ export const TEMPLATES: TemplateDef[] = [
     draw: (el, d) => {
       const mid = Math.round(d.w / 2);
       line(el, mid, 40, mid, d.h - 40, "is-strong");
-      label(el, "Question", LEFT, 34);
-      label(el, "Solution", mid + 16, 34);
+      label(el, T("Question"), LEFT, 34);
+      label(el, T("Solution"), mid + 16, 34);
     },
   },
   {
@@ -77,7 +78,7 @@ export const TEMPLATES: TemplateDef[] = [
       f.style.width = d.w - 56 + "px";
       f.style.height = d.h - 56 + "px";
       line(el, Math.round(d.w / 2) + 24, 80, Math.round(d.w / 2) + 24, d.h - 60, "is-dashed");
-      label(el, "Formulas", LEFT, 34, "is-title");
+      label(el, T("Formulas"), LEFT, 34, "is-title");
     },
   },
   {

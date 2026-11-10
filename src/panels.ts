@@ -3,6 +3,7 @@ import { Modal, setIcon, type App } from "obsidian";
 import { drawStrokes } from "./render";
 import { NOTE_COLORS, STAMPS, STAMP_COLORS } from "./objects";
 import type { Sticker, Tone } from "./settings";
+import { T } from "./i18n";
 
 export type StickerPick = { stamp: string; color: string } | { sticker: Sticker };
 
@@ -23,7 +24,7 @@ export class StickerModal extends Modal {
 
   onOpen() {
     this.modalEl.addClass("defter-sticker-modal");
-    this.titleEl.setText("Stickers");
+    this.titleEl.setText(T("Stickers"));
     this.render();
   }
 
@@ -35,10 +36,10 @@ export class StickerModal extends Modal {
   private render() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createDiv({ cls: "defter-set-label", text: "Stamps" });
+    contentEl.createDiv({ cls: "defter-set-label", text: T("Stamps") });
     const colors = contentEl.createDiv("defter-set-row");
     for (const c of STAMP_COLORS) {
-      const b = colors.createEl("button", { cls: "defter-swatch defter-swatch-lg", attr: { "aria-label": "Stamp colour" } });
+      const b = colors.createEl("button", { cls: "defter-swatch defter-swatch-lg", attr: { "aria-label": T("Stamp colour") } });
       b.style.setProperty("--swatch", c);
       b.toggleClass("is-active", c === this.color);
       b.onclick = () => {
@@ -47,7 +48,7 @@ export class StickerModal extends Modal {
       };
     }
     const grid = contentEl.createDiv("defter-stamp-grid");
-    for (const s of STAMPS) {
+    for (const s of STAMPS.map((x) => T(x))) {
       const b = grid.createEl("button", { cls: "defter-stamp-pick" });
       const el = b.createDiv("defter-obj defter-obj-stamp");
       el.style.setProperty("--stamp", this.color);
@@ -56,17 +57,17 @@ export class StickerModal extends Modal {
       b.onclick = () => this.choose({ stamp: s, color: this.color });
     }
     const custom = contentEl.createDiv("defter-stamp-custom");
-    const input = custom.createEl("input", { type: "text", attr: { placeholder: "Your own stamp, e.g. DONE", maxlength: "18" } });
-    const add = custom.createEl("button", { text: "Add stamp" });
+    const input = custom.createEl("input", { type: "text", attr: { placeholder: T("Your own stamp, e.g. DONE"), maxlength: "18" } });
+    const add = custom.createEl("button", { text: T("Add stamp") });
     const go = () => input.value.trim() && this.choose({ stamp: input.value.trim().toLocaleUpperCase(), color: this.color });
     add.onclick = go;
     input.addEventListener("keydown", (e) => e.key === "Enter" && go());
 
-    contentEl.createDiv({ cls: "defter-set-label", text: "My stickers" });
+    contentEl.createDiv({ cls: "defter-set-label", text: T("My stickers") });
     if (!this.stickers.length) {
       contentEl.createDiv({
         cls: "defter-empty",
-        text: "Select a drawing with the lasso and press “Save as sticker” to reuse it in any notebook.",
+        text: T("Select a drawing with the lasso and press “Save as sticker” to reuse it in any notebook."),
       });
       return;
     }
@@ -86,7 +87,7 @@ export class StickerModal extends Modal {
       }
       drawStrokes(ctx, st.ink, this.tone);
       canvas.onclick = () => this.choose({ sticker: st });
-      const del = cell.createEl("button", { cls: "defter-sticker-del clickable-icon", attr: { "aria-label": "Delete sticker" } });
+      const del = cell.createEl("button", { cls: "defter-sticker-del clickable-icon", attr: { "aria-label": T("Delete sticker") } });
       setIcon(del, "x");
       del.onclick = () => {
         this.remove(st);
@@ -163,13 +164,13 @@ const SHORTCUTS: [string, [string, string][]][] = [
 export class HelpModal extends Modal {
   onOpen() {
     this.modalEl.addClass("defter-help-modal");
-    this.titleEl.setText("Keyboard shortcuts");
+    this.titleEl.setText(T("Keyboard shortcuts"));
     for (const [group, rows] of SHORTCUTS) {
-      this.contentEl.createDiv({ cls: "defter-set-label", text: group });
+      this.contentEl.createDiv({ cls: "defter-set-label", text: T(group) });
       const table = this.contentEl.createDiv("defter-help-table");
       for (const [k, v] of rows) {
         table.createEl("kbd", { text: k });
-        table.createSpan({ text: v });
+        table.createSpan({ text: T(v) });
       }
     }
   }

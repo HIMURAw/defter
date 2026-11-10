@@ -8,6 +8,8 @@ export function ensureMath(): Promise<void> {
   return mathReady;
 }
 import type { PageObject } from "./format";
+import { T } from "./i18n";
+import { easyToTex } from "./math";
 
 export const NOTE_COLORS = ["#fff27a", "#ffc4dd", "#c8f5b4", "#bfe3ff"];
 export const TAPE_COLORS = ["#f4c95d", "#f29bb7", "#8fd0a8", "#93bfef", "#b9b0a2"];
@@ -25,10 +27,10 @@ export function renderObject(app: App, layer: HTMLElement, o: PageObject, ink: s
   if (o.k === "img") {
     const f = app.vault.getAbstractFileByPath(o.v);
     if (f) el.createEl("img", { attr: { src: app.vault.getResourcePath(f as TFile), draggable: "false" } });
-    else el.createDiv({ cls: "defter-obj-missing", text: "Missing image: " + o.v });
+    else el.createDiv({ cls: "defter-obj-missing", text: T("Missing image: ") + o.v });
   } else if (o.k === "tape") {
     el.style.setProperty("--tape", o.c ?? TAPE_COLORS[0]);
-    el.setAttr("aria-label", "Click to show or hide what is under the tape");
+    el.setAttr("aria-label", T("Click to show or hide what is under the tape"));
   } else if (o.k === "stamp") {
     el.style.setProperty("--stamp", o.c ?? STAMP_COLORS[0]);
     el.toggleClass("is-symbol", [...o.v].length <= 2);
@@ -80,29 +82,61 @@ export async function saveImage(app: App, blob: Blob, notebook: TFile): Promise<
 export class TexModal extends Modal {
   private value: string;
   private done: (tex: string, w: number, h: number) => void;
+  /** Easy: sqrt(x)/2, x^2, pi … LaTeX: the real thing. New formulas start easy. */
+  private easy: boolean;
 
   constructor(app: App, value: string, done: (tex: string, w: number, h: number) => void) {
     super(app);
     this.value = value;
     this.done = done;
+    this.easy = !value;
+  }
+
+  private get tex() {
+    return this.easy ? easyToTex(this.value) : this.value;
   }
 
   onOpen() {
-    this.titleEl.setText("Formula");
+    this.titleEl.setText(T("Formula"));
     this.modalEl.addClass("defter-tex-modal");
+    const modes = this.contentEl.createDiv("defter-tex-modes");
     const preview = this.contentEl.createDiv("defter-tex-preview");
+    const help = this.contentEl.createDiv("defter-tex-help");
     const draw = async () => {
       await ensureMath();
       preview.empty();
-      if (!this.value.trim()) {
-        preview.setText("Type LaTeX, e.g. \\frac{a}{b}, x^2, \\sqrt{3}, \\int_0^1 f(x)\\,dx");
-        return;
+      help.setText(
+        this.easy
+          ? T("Write it the everyday way: sqrt(x+1)/2, x^2, x^(n+1), a_1, pi, <=, !=, abs(x), sin(x), sum, int, inf")
+          : T("Type LaTeX, e.g. \\frac{a}{b}, x^2, \\sqrt{3}, \\int_0^1 f(x)\\,dx")
+      );
+      if (!this.value.trim()) return;
+      try {
+        preview.appendChild(renderMath(this.tex, true));
+        void finishRenderMath();
+      } catch {
+        preview.setText("…");
       }
-      preview.appendChild(renderMath(this.value, true));
-      void finishRenderMath();
     };
     let input: HTMLTextAreaElement;
-    new Setting(this.contentEl).setName("LaTeX").addTextArea((t) => {
+    const modeBtn = (easy: boolean, label: string) => {
+      const b = modes.createEl("button", { cls: "defter-seg", text: T(label) });
+      b.toggleClass("is-active", this.easy === easy);
+      b.onclick = () => {
+        if (this.easy === easy) return;
+        // Switching to LaTeX keeps what was written, translated.
+        if (!easy) this.value = easyToTex(this.value);
+        this.easy = easy;
+        if (easy) this.value = "";
+        input.value = this.value;
+        for (const el of Array.from(modes.children)) el.toggleClass("is-active", el === b);
+        void draw();
+        input.focus();
+      };
+    };
+    modeBtn(true, "Easy");
+    modeBtn(false, "LaTeX");
+    new Setting(this.contentEl).addTextArea((t) => {
       input = t.inputEl;
       t.setValue(this.value).onChange((v) => {
         this.value = v;
@@ -110,22 +144,20 @@ export class TexModal extends Modal {
       });
       t.inputEl.rows = 3;
       t.inputEl.addClass("defter-tex-input");
+      t.inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) place();
+      });
       setTimeout(() => t.inputEl.focus(), 0);
     });
-    new Setting(this.contentEl).addButton((b) =>
-      b
-        .setButtonText("Place on page")
-        .setCta()
-        .onClick(() => {
-          if (!this.value.trim()) return;
-          const math = (preview.querySelector("mjx-container") as HTMLElement | null) ?? preview;
-          const r = math.getBoundingClientRect();
-          this.close();
-          this.done(this.value.trim(), Math.max(40, Math.round(r.width)), Math.max(30, Math.round(r.height)));
-        })
-    );
+    const place = () => {
+      if (!this.value.trim()) return;
+      const math = (preview.querySelector("mjx-container") as HTMLElement | null) ?? preview;
+      const r = math.getBoundingClientRect();
+      this.close();
+      this.done(this.tex.trim(), Math.max(40, Math.round(r.width)), Math.max(30, Math.round(r.height)));
+    };
+    new Setting(this.contentEl).addButton((b) => b.setButtonText(T("Place on page")).setCta().onClick(place));
     void draw();
-    void input!;
   }
 
   onClose() {

@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import { getProp, type PageObject, type Stroke } from "./format";
 import type { CardState } from "./cards";
+import { LANGUAGES, T, setLanguage } from "./i18n";
 
 /** A drawing saved for reuse, stored with its top-left corner at 0,0. */
 export interface Sticker {
@@ -112,6 +113,16 @@ export interface DefterSettings {
   dateLocale: string;
   pageTurn: boolean;
   spread: SpreadMode;
+  /** Interface language: "auto" follows Obsidian. */
+  language: string;
+  /** Maths: \\sqrt → √, <= → ≤ while typing. */
+  mathShortcuts: boolean;
+  /** Maths: Tab after "12*3 =" writes the result. */
+  calculator: boolean;
+  /** Library shows private (locked) notebooks. */
+  showPrivate: boolean;
+  /** Private notebooks lock after this many idle minutes (0 = only when closed). */
+  lockMinutes: number;
 }
 
 export const DEFAULT_SETTINGS: DefterSettings = {
@@ -133,6 +144,11 @@ export const DEFAULT_SETTINGS: DefterSettings = {
   dateLocale: "",
   pageTurn: true,
   spread: "auto",
+  language: "auto",
+  mathShortcuts: true,
+  calculator: true,
+  showPrivate: false,
+  lockMinutes: 10,
 };
 
 /** Settings fields that hold objects and must not be shared with the defaults. */
@@ -222,64 +238,100 @@ export class DefterSettingTab extends PluginSettingTab {
       await this.host.saveSettings();
       this.host.refreshViews();
     };
+    new Setting(containerEl)
+      .setName(T("Language"))
+      .setDesc(T("Language of menus and buttons. Reopen notebooks to see the change everywhere."))
+      .addDropdown((d) => {
+        for (const [id, label] of LANGUAGES) d.addOption(id, T(label));
+        d.setValue(s.language).onChange(async (v) => {
+          s.language = v;
+          setLanguage(v);
+          await save();
+          this.display();
+        });
+      });
     containerEl.createEl("p", {
-      text: "Defaults for notebooks. Each notebook can override these from its own settings (the sliders icon in the notebook header).",
+      text: T("Defaults for notebooks. Each notebook can override these from its own settings (the sliders icon in the notebook header)."),
       cls: "setting-item-description",
     });
 
-    new Setting(containerEl).setName("Page size").addDropdown((d) => {
-      for (const p of PAGE_SIZES) d.addOption(p.id, p.label);
+    new Setting(containerEl).setName(T("Page size")).addDropdown((d) => {
+      for (const p of PAGE_SIZES) d.addOption(p.id, T(p.label));
       d.setValue(s.page).onChange(async (v) => ((s.page = v as PageSize), await save()));
     });
-    new Setting(containerEl).setName("Paper").addDropdown((d) => {
-      for (const p of PAPERS) d.addOption(p.id, p.label);
+    new Setting(containerEl).setName(T("Paper")).addDropdown((d) => {
+      for (const p of PAPERS) d.addOption(p.id, T(p.label));
       d.setValue(s.paper).onChange(async (v) => ((s.paper = v as Paper), await save()));
     });
-    new Setting(containerEl).setName("Paper tone").addDropdown((d) => {
-      for (const t of TONES) d.addOption(t.id, t.label);
+    new Setting(containerEl).setName(T("Paper tone")).addDropdown((d) => {
+      for (const t of TONES) d.addOption(t.id, T(t.label));
       d.setValue(s.tone).onChange(async (v) => ((s.tone = v as Tone), await save()));
     });
-    new Setting(containerEl).setName("Handwriting").addDropdown((d) => {
-      for (const f of FONTS) d.addOption(f.id, f.label);
+    new Setting(containerEl).setName(T("Handwriting")).addDropdown((d) => {
+      for (const f of FONTS) d.addOption(f.id, T(f.label));
       d.setValue(s.font).onChange(async (v) => ((s.font = v as FontId), await save()));
     });
-    new Setting(containerEl).setName("Text size").addDropdown((d) => {
-      for (const z of SIZES) d.addOption(z.id, z.label);
+    new Setting(containerEl).setName(T("Text size")).addDropdown((d) => {
+      for (const z of SIZES) d.addOption(z.id, T(z.label));
       d.setValue(s.size).onChange(async (v) => ((s.size = v as SizeId), await save()));
     });
-    new Setting(containerEl).setName("Ink colour").addDropdown((d) => {
-      for (const i of INKS) d.addOption(i.id, i.label);
+    new Setting(containerEl).setName(T("Ink colour")).addDropdown((d) => {
+      for (const i of INKS) d.addOption(i.id, T(i.label));
       d.setValue(s.ink).onChange(async (v) => ((s.ink = v), await save()));
     });
     new Setting(containerEl)
-      .setName("Writing animation")
-      .setDesc("How fast each letter is drawn as you type.")
+      .setName(T("Writing animation"))
+      .setDesc(T("How fast each letter is drawn as you type."))
       .addDropdown((d) => {
-        d.addOption("off", "Off").addOption("fast", "Fast").addOption("normal", "Normal").addOption("slow", "Slow");
+        d.addOption("off", T("Off")).addOption("fast", T("Fast")).addOption("normal", T("Normal")).addOption("slow", T("Slow"));
         d.setValue(s.anim).onChange(async (v) => ((s.anim = v as AnimSpeed), await save()));
       });
 
-    new Setting(containerEl).setName("Pages").setHeading();
+    new Setting(containerEl).setName(T("Maths")).setHeading();
     new Setting(containerEl)
-      .setName("Two-page spread")
-      .setDesc("Show two pages side by side like an open book. Auto does it when the pane is wide enough.")
+      .setName(T("Symbol shortcuts"))
+      .setDesc(T("While typing, \\sqrt becomes √, \\pi π, <= ≤, != ≠, -> → and so on."))
+      .addToggle((t) => t.setValue(s.mathShortcuts).onChange(async (v) => ((s.mathShortcuts = v), await save())));
+    new Setting(containerEl)
+      .setName(T("Calculator"))
+      .setDesc(T("Write a calculation ending with = (e.g. 12*3+4 =) and press Tab to write the result."))
+      .addToggle((t) => t.setValue(s.calculator).onChange(async (v) => ((s.calculator = v), await save())));
+
+    new Setting(containerEl).setName(T("Private notebooks")).setHeading();
+    new Setting(containerEl)
+      .setName(T("Show private notebooks in the library"))
+      .setDesc(T("Private notebooks are hidden from the library unless this is on. “Open private notebook…” in the command palette always works."))
+      .addToggle((t) => t.setValue(s.showPrivate).onChange(async (v) => ((s.showPrivate = v), await save())));
+    new Setting(containerEl)
+      .setName(T("Lock after"))
+      .setDesc(T("An open private notebook locks itself after this many minutes without use."))
       .addDropdown((d) => {
-        d.addOption("auto", "Auto").addOption("single", "Always one page").addOption("spread", "Always two pages");
+        for (const m of [1, 5, 10, 30, 60]) d.addOption(String(m), T("{n} min", { n: m }));
+        d.addOption("0", T("Only when closed"));
+        d.setValue(String(s.lockMinutes)).onChange(async (v) => ((s.lockMinutes = Number(v)), await save()));
+      });
+
+    new Setting(containerEl).setName(T("Pages")).setHeading();
+    new Setting(containerEl)
+      .setName(T("Two-page spread"))
+      .setDesc(T("Show two pages side by side like an open book. Auto does it when the pane is wide enough."))
+      .addDropdown((d) => {
+        d.addOption("auto", T("Auto")).addOption("single", T("Always one page")).addOption("spread", T("Always two pages"));
         d.setValue(s.spread).onChange(async (v) => ((s.spread = v as SpreadMode), await save()));
       });
     new Setting(containerEl)
-      .setName("Page turn animation")
+      .setName(T("Page turn animation"))
       .addToggle((t) => t.setValue(s.pageTurn).onChange(async (v) => ((s.pageTurn = v), await save())));
     new Setting(containerEl)
-      .setName("Date language")
-      .setDesc("Language of the dates written on journal pages.")
+      .setName(T("Date language"))
+      .setDesc(T("Language of the dates written on journal pages."))
       .addDropdown((d) => {
-        for (const [id, label] of DATE_LOCALES) d.addOption(id, label);
+        for (const [id, label] of DATE_LOCALES) d.addOption(id, T(label));
         d.setValue(s.dateLocale).onChange(async (v) => ((s.dateLocale = v), setDateLocale(v), await save()));
       });
     new Setting(containerEl)
-      .setName("Touchpad speed")
-      .setDesc("How far the pen moves for a finger movement in the write pad's touchpad mode.")
+      .setName(T("Touchpad speed"))
+      .setDesc(T("How far the pen moves for a finger movement in the write pad's touchpad mode."))
       .addSlider((sl) =>
         sl
           .setLimits(0.4, 2.5, 0.1)

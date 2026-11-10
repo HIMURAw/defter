@@ -6,6 +6,7 @@ import { setIcon } from "obsidian";
 import type { Page, Stroke } from "./format";
 import { LINE, TEXT_TOP, drawStrokes, type PageDims } from "./render";
 import type { Tone } from "./settings";
+import { T } from "./i18n";
 
 export interface PadHost {
   sheetEl: HTMLElement;
@@ -52,7 +53,7 @@ export class WritePad {
     this.el = root.createDiv("defter-pad");
     const bar = this.el.createDiv("defter-pad-bar");
     const button = (icon: string, label: string, fn: () => void) => {
-      const b = bar.createEl("button", { cls: "defter-btn clickable-icon", attr: { "aria-label": label, "data-tooltip-position": "top" } });
+      const b = bar.createEl("button", { cls: "defter-btn clickable-icon", attr: { "aria-label": T(label), "data-tooltip-position": "top" } });
       setIcon(b, icon);
       b.onclick = (e) => {
         e.preventDefault();
@@ -377,13 +378,13 @@ export class WritePad {
   }
 
   private updateHint() {
-    this.hint.setText(
+    this.hint.setText(T(
       this.locked
         ? "Touchpad mode: move your finger to move the pen, hold Space to write. Esc leaves."
         : this.hover
         ? "Touchpad mode: move the cursor over the strip, hold Space to write, release to lift the pen. Esc leaves."
         : "Write large here; it lands small in the frame on the page. Click the page to move the frame."
-    );
+    ));
   }
 
   close() {

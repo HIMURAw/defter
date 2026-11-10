@@ -1,4 +1,4 @@
-import { Menu, Notice, Scope, TextFileView, normalizePath, setIcon, type WorkspaceLeaf } from "obsidian";
+import { Menu, Modal, Notice, Scope, Setting, TextFileView, normalizePath, setIcon, type App, type WorkspaceLeaf } from "obsidian";
 import {
   emptyNotebook,
   emptyPage,
@@ -38,9 +38,26 @@ import { StudyModal, type StudyHost } from "./study-modal";
 import type { StudyTimer } from "./timer";
 import { WritePad } from "./write-pad";
 import { importPdf } from "./pdf-import";
+import { T } from "./i18n";
 import { HelpModal, StickerModal } from "./panels";
 import { renderStaticPage } from "./static-page";
 import { getRemote } from "./pdf";
+import {
+  LOCK_KEY,
+  WrongSecretError,
+  changePassword,
+  createLock,
+  isLockedText,
+  openNotebookText,
+  parseLocked,
+  renewRecovery,
+  sealNotebook,
+  unlockWithPassword,
+  unlockWithRecovery,
+  type LockSession,
+} from "./lock";
+import { PasswordModal, RecoveryModal } from "./lock-ui";
+import { NAMED as MATH_NAMED, OPERATORS as MATH_OPERATORS, calcLine, shortcutAt } from "./math";
 import { NotebookSettingsModal } from "./notebook-settings";
 import { applyBox, drawDecor, drawObjects, pageBox } from "./page-decor";
 import { NOTE_COLORS, STAMP_COLORS, TAPE_COLORS, TexModal, hitObject, saveImage } from "./objects";
@@ -142,6 +159,12 @@ export class DefterView extends TextFileView {
   private host: DefterHost;
   private pageIndex = 0;
   private rawBroken: string | null = null;
+  /** Private notebook: the key while unlocked, and the latest encrypted file. */
+  private lock: LockSession | null = null;
+  private sealed: string | null = null;
+  lastActive = Date.now();
+  private lockEl!: HTMLElement;
+  private lockBtn: HTMLElement | null = null;
   private tool: Tool = "write";
   private shapeKind: ShapeKind = "line";
   private penColor = INKS[0].id;
@@ -226,7 +249,7 @@ export class DefterView extends TextFileView {
     return "notebook-pen";
   }
   getDisplayText() {
-    return this.file ? this.file.basename : "Notebook";
+    return this.file ? this.file.basename : T("Notebook");
   }
 
   private get journal() {
@@ -234,17 +257,19 @@ export class DefterView extends TextFileView {
   }
 
   async onOpen() {
-    this.addAction("sliders-horizontal", "Notebook settings", () => this.openSettings());
-    this.timerBtn = this.addAction("timer", "Study timer", (e) => this.host.timer.menu(e, this.file?.path, this.getDisplayText()));
-    this.cardsBtn = this.addAction("layers", "Study flashcards (front :: back lines)", () => this.studyCards());
-    this.studyBtn = this.addAction("eye-off", "Study mode: hide highlighted text and card answers (Alt+S)", () => this.toggleStudy());
-    this.addAction("list", "Pages", () => this.toggleDrawer(false));
-    this.addAction("search", "Search this notebook", () => this.toggleDrawer(true));
-    this.calendarBtn = this.addAction("calendar-days", "Journal calendar", () => this.openCalendar());
+    this.addAction("sliders-horizontal", T("Notebook settings"), () => this.openSettings());
+    this.timerBtn = this.addAction("timer", T("Study timer"), (e) => this.host.timer.menu(e, this.file?.path, this.getDisplayText()));
+    this.cardsBtn = this.addAction("layers", T("Study flashcards (front :: back lines)"), () => this.studyCards());
+    this.lockBtn = this.addAction("lock", T("Lock now"), () => void this.lockNow());
+    this.lockBtn.toggle(false);
+    this.studyBtn = this.addAction("eye-off", T("Study mode: hide highlighted text and card answers (Alt+S)"), () => this.toggleStudy());
+    this.addAction("list", T("Pages"), () => this.toggleDrawer(false));
+    this.addAction("search", T("Search this notebook"), () => this.toggleDrawer(true));
+    this.calendarBtn = this.addAction("calendar-days", T("Journal calendar"), () => this.openCalendar());
     this.calendarBtn.toggle(false);
     const actions = (this as unknown as { actionsEl?: HTMLElement }).actionsEl;
     if (actions) {
-      this.chipEl = createDiv({ cls: "defter-chip clickable-icon", attr: { "aria-label": "Pages" } });
+      this.chipEl = createDiv({ cls: "defter-chip clickable-icon", attr: { "aria-label": T("Pages") } });
       actions.prepend(this.chipEl);
       this.registerDomEvent(this.chipEl, "click", () => this.toggleDrawer(false));
     }
@@ -262,30 +287,70 @@ export class DefterView extends TextFileView {
 
   onPaneMenu(menu: Menu, source: string) {
     if (source === "more-options" || source === "tab-header") {
-      menu.addItem((i) => i.setSection("action").setTitle("Notebook settings").setIcon("sliders-horizontal").onClick(() => this.openSettings()));
-      menu.addItem((i) => i.setSection("action").setTitle("Add page after this one").setIcon("file-plus").onClick(() => this.addPage()));
-      menu.addItem((i) => i.setSection("action").setTitle("Duplicate this page").setIcon("copy").onClick(() => this.duplicatePage(this.pageIndex)));
-      menu.addItem((i) => i.setSection("action").setTitle("Remove this page").setIcon("file-minus").onClick(() => this.removePage(this.pageIndex)));
-      menu.addItem((i) => i.setSection("action").setTitle("Import PDF pages…").setIcon("file-input").onClick(() => this.importPdf()));
-      menu.addItem((i) => i.setSection("action").setTitle("Pull text back from the next pages").setIcon("wrap-text").onClick(() => this.reflow()));
-      menu.addItem((i) => i.setSection("action").setTitle("Export to PDF").setIcon("file-output").onClick(() => this.exportPdf()));
-      menu.addItem((i) => i.setSection("action").setTitle("Copy page as image").setIcon("image").onClick(() => void this.pageImage("copy")));
-      menu.addItem((i) => i.setSection("action").setTitle("Save page as PNG").setIcon("image-down").onClick(() => void this.pageImage("save")));
-      menu.addItem((i) => i.setSection("view").setTitle("Focus mode (Alt+F)").setIcon("maximize").onClick(() => this.toggleFocus()));
-      menu.addItem((i) => i.setSection("view").setTitle("Keyboard shortcuts (F1)").setIcon("keyboard").onClick(() => new HelpModal(this.app).open()));
-      menu.addItem((i) => i.setSection("action").setTitle("Open as Markdown").setIcon("file-text").onClick(() => this.host.openAsMarkdown(this.leaf)));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Notebook settings")).setIcon("sliders-horizontal").onClick(() => this.openSettings()));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Add page after this one")).setIcon("file-plus").onClick(() => this.addPage()));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Duplicate this page")).setIcon("copy").onClick(() => this.duplicatePage(this.pageIndex)));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Remove this page")).setIcon("file-minus").onClick(() => this.removePage(this.pageIndex)));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Import PDF pages…")).setIcon("file-input").onClick(() => this.importPdf()));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Pull text back from the next pages")).setIcon("wrap-text").onClick(() => this.reflow()));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Export to PDF")).setIcon("file-output").onClick(() => this.exportPdf()));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Copy page as image")).setIcon("image").onClick(() => void this.pageImage("copy")));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Save page as PNG")).setIcon("image-down").onClick(() => void this.pageImage("save")));
+      if (this.lock) {
+        menu.addItem((i) => i.setSection("lock").setTitle(T("Lock now")).setIcon("lock").onClick(() => void this.lockNow()));
+        menu.addItem((i) => i.setSection("lock").setTitle(T("Change password…")).setIcon("key-round").onClick(() => this.changePassword()));
+        menu.addItem((i) => i.setSection("lock").setTitle(T("New recovery key…")).setIcon("life-buoy").onClick(() => void this.newRecovery()));
+        menu.addItem((i) => i.setSection("lock").setTitle(T("Remove password…")).setIcon("lock-open").onClick(() => this.removeLock()));
+      } else if (this.rawBroken === null) {
+        menu.addItem((i) => i.setSection("lock").setTitle(T("Make private (password)…")).setIcon("lock").onClick(() => this.makePrivate()));
+      }
+      menu.addItem((i) => i.setSection("view").setTitle(T("Focus mode (Alt+F)")).setIcon("maximize").onClick(() => this.toggleFocus()));
+      menu.addItem((i) => i.setSection("view").setTitle(T("Keyboard shortcuts (F1)")).setIcon("keyboard").onClick(() => new HelpModal(this.app).open()));
+      menu.addItem((i) => i.setSection("action").setTitle(T("Open as Markdown")).setIcon("file-text").onClick(() => this.host.openAsMarkdown(this.leaf)));
     }
     super.onPaneMenu(menu, source);
   }
 
   getViewData() {
-    // A file we could not read is handed back untouched, never overwritten.
+    // A file we could not read (or a locked one) is handed back untouched.
     if (this.rawBroken !== null) return this.rawBroken;
+    // A private notebook never leaves memory unencrypted.
+    if (this.lock) return this.sealed ?? "";
     return serializeNotebook(this.nb);
+  }
+
+  /** Private notebooks are encrypted before Obsidian writes the file. */
+  async save(clear?: boolean) {
+    if (this.lock && this.rawBroken === null) {
+      this.sealed = await sealNotebook(this.lock, this.nb.frontmatter, serializeNotebook(this.nb));
+    }
+    return super.save(clear);
   }
 
   setViewData(data: string, clear: boolean) {
     this.ensureUi();
+    this.lockEl.toggle(false);
+    if (isLockedText(data)) {
+      // Until it is unlocked the file is handed back exactly as it is.
+      this.rawBroken = data;
+      if (this.lock && !clear) {
+        void this.reopenLocked(data);
+        return;
+      }
+      this.lock = null;
+      this.sealed = null;
+      this.showLockScreen(data);
+      return;
+    }
+    if (clear) {
+      this.lock = null;
+      this.sealed = null;
+    }
+    this.loadText(data, clear);
+  }
+
+  private loadText(data: string, clear: boolean) {
+    this.lockBtn?.toggle(!!this.lock);
     try {
       this.nb = parseNotebook(data);
       this.rawBroken = null;
@@ -295,7 +360,7 @@ export class DefterView extends TextFileView {
     } catch (e) {
       this.rawBroken = data;
       this.errorEl.setText(
-        "This notebook could not be read, so it was left unchanged. Use “Open as Markdown” to look at the file. " +
+        T("This notebook could not be read, so it was left unchanged. Use “Open as Markdown” to look at the file.") + " " +
           ((e as Error).message || "")
       );
       this.errorEl.toggle(true);
@@ -319,6 +384,8 @@ export class DefterView extends TextFileView {
   clear() {
     this.nb = emptyNotebook();
     this.rawBroken = null;
+    this.lock = null;
+    this.sealed = null;
     this.pageIndex = 0;
     this.undoStack = [];
     this.redoStack = [];
@@ -414,6 +481,8 @@ export class DefterView extends TextFileView {
     root.tabIndex = -1;
     this.errorEl = root.createDiv("defter-error");
     this.errorEl.toggle(false);
+    this.lockEl = root.createDiv("defter-lock-screen");
+    this.lockEl.toggle(false);
 
     this.deskEl = root.createDiv("defter-desk");
     this.holderEl = this.deskEl.createDiv("defter-holder");
@@ -436,7 +505,8 @@ export class DefterView extends TextFileView {
     this.buildDock(root);
     this.buildDrawer(root);
 
-    this.registerDomEvent(this.textEl, "input", () => this.onTextInput());
+    this.registerDomEvent(this.textEl, "input", (e) => this.onTextInput(e as InputEvent));
+    this.registerDomEvent(this.textEl, "keydown", (e) => this.onTextKey(e));
     this.registerDomEvent(this.textEl, "click", (e) => this.onTextClick(e));
     this.registerDomEvent(this.inkCanvas, "pointerdown", (e) => this.onPointerDown(e));
     this.registerDomEvent(this.inkCanvas, "pointermove", (e) => this.onPointerMove(e));
@@ -445,6 +515,8 @@ export class DefterView extends TextFileView {
     this.registerDomEvent(this.inkCanvas, "dblclick", (e) => this.onDoubleClick(e));
     this.registerDomEvent(this.inkCanvas, "contextmenu", (e) => e.preventDefault());
     this.registerDomEvent(root, "keydown", (e) => this.onKeyDown(e));
+    this.registerDomEvent(root, "pointerdown", () => (this.lastActive = Date.now()), { capture: true });
+    this.registerDomEvent(root, "keydown", () => (this.lastActive = Date.now()), { capture: true });
     this.registerDomEvent(root, "paste", (e) => this.onPaste(e));
     this.registerDomEvent(this.deskEl, "wheel", (e) => this.onWheel(e), { passive: false });
 
@@ -469,35 +541,36 @@ export class DefterView extends TextFileView {
   private buildDock(root: HTMLElement) {
     this.dockEl = root.createDiv("defter-dock");
     const tools = this.dockEl.createDiv("defter-group");
-    this.toolButtons.write = this.iconButton(tools, "type", "Write (Alt+1)", () => this.setTool("write"));
-    this.toolButtons.pen = this.iconButton(tools, "pen-line", "Pen (Alt+2)", () => this.setTool("pen"));
-    this.toolButtons.hl = this.iconButton(tools, "highlighter", "Highlighter (Alt+3)", () => this.setTool("hl"));
-    this.toolButtons.shape = this.iconButton(tools, "minus", "Shapes: line, arrow, box (Alt+5)", (e) => this.shapeMenu(e));
-    this.toolButtons.erase = this.iconButton(tools, "eraser", "Eraser (Alt+4)", () => this.setTool("erase"));
-    this.toolButtons.select = this.iconButton(tools, "lasso-select", "Select and move (Alt+6)", () => this.setTool("select"));
-    this.toolButtons.pad = this.iconButton(tools, "signature", "Write pad: write with the mouse or touchpad (Alt+7)", () => this.setTool(this.tool === "pad" ? "write" : "pad"));
-    this.iconButton(tools, "plus-square", "Insert: picture, sticky note, tape, sticker, formula, PDF, template, bookmark", (e) => this.insertMenu(e));
+    this.toolButtons.write = this.iconButton(tools, "type", T("Write (Alt+1)"), () => this.setTool("write"));
+    this.toolButtons.pen = this.iconButton(tools, "pen-line", T("Pen (Alt+2)"), () => this.setTool("pen"));
+    this.toolButtons.hl = this.iconButton(tools, "highlighter", T("Highlighter (Alt+3)"), () => this.setTool("hl"));
+    this.toolButtons.shape = this.iconButton(tools, "minus", T("Shapes: line, arrow, box (Alt+5)"), (e) => this.shapeMenu(e));
+    this.toolButtons.erase = this.iconButton(tools, "eraser", T("Eraser (Alt+4)"), () => this.setTool("erase"));
+    this.toolButtons.select = this.iconButton(tools, "lasso-select", T("Select and move (Alt+6)"), () => this.setTool("select"));
+    this.toolButtons.pad = this.iconButton(tools, "signature", T("Write pad: write with the mouse or touchpad (Alt+7)"), () => this.setTool(this.tool === "pad" ? "write" : "pad"));
+    this.iconButton(tools, "sigma", T("Maths: symbols, shortcuts, calculator"), () => this.toggleMathPanel());
+    this.iconButton(tools, "plus-square", T("Insert: picture, sticky note, tape, sticker, formula, PDF, template, bookmark"), (e) => this.insertMenu(e));
 
     this.swatchesEl = this.dockEl.createDiv("defter-group defter-swatches");
     this.widthsEl = this.dockEl.createDiv("defter-group");
 
     const history = this.dockEl.createDiv("defter-group");
-    this.iconButton(history, "undo-2", "Undo drawing (Ctrl+Z)", () => this.undo());
-    this.iconButton(history, "redo-2", "Redo drawing (Ctrl+Y)", () => this.redo());
+    this.iconButton(history, "undo-2", T("Undo drawing (Ctrl+Z)"), () => this.undo());
+    this.iconButton(history, "redo-2", T("Redo drawing (Ctrl+Y)"), () => this.redo());
 
     const nav = this.dockEl.createDiv("defter-group");
-    this.iconButton(nav, "chevron-left", "Previous page (Page Up)", () => this.goTo(this.pageIndex - 1));
+    this.iconButton(nav, "chevron-left", T("Previous page (Page Up)"), () => this.goTo(this.pageIndex - 1));
     this.counterEl = nav.createSpan("defter-counter");
-    this.iconButton(nav, "chevron-right", "Next page (Page Down)", () => this.goTo(this.pageIndex + 1));
-    this.iconButton(nav, "plus", "New page after this one", () => this.addPage());
-    this.zoomEl = nav.createEl("button", { cls: "defter-zoom", attr: { "aria-label": "Zoom (Ctrl+wheel). Click to fit the page.", "data-tooltip-position": "top" } });
+    this.iconButton(nav, "chevron-right", T("Next page (Page Down)"), () => this.goTo(this.pageIndex + 1));
+    this.iconButton(nav, "plus", T("New page after this one"), () => this.addPage());
+    this.zoomEl = nav.createEl("button", { cls: "defter-zoom", attr: { "aria-label": T("Zoom (Ctrl+wheel). Click to fit the page."), "data-tooltip-position": "top" } });
     this.registerDomEvent(this.zoomEl, "click", (e) => this.zoomMenu(e));
-    this.iconButton(nav, "help-circle", "Keyboard shortcuts (F1)", () => new HelpModal(this.app).open());
+    this.iconButton(nav, "help-circle", T("Keyboard shortcuts (F1)"), () => new HelpModal(this.app).open());
   }
 
   private zoomMenu(e: MouseEvent) {
     const menu = new Menu();
-    menu.addItem((i) => i.setTitle("Fit the page (Ctrl+0)").setIcon("maximize-2").onClick(() => this.setZoom(1)));
+    menu.addItem((i) => i.setTitle(T("Fit the page (Ctrl+0)")).setIcon("maximize-2").onClick(() => this.setZoom(1)));
     for (const z of ZOOMS) menu.addItem((i) => i.setTitle(Math.round(z * 100) + "%").setChecked(Math.abs(z - this.zoom) < 0.01).onClick(() => this.setZoom(z)));
     menu.showAtMouseEvent(e);
   }
@@ -530,7 +603,7 @@ export class DefterView extends TextFileView {
     for (const s of SHAPE_DEFS) {
       menu.addItem((i) =>
         i
-          .setTitle(s.label)
+          .setTitle(T(s.label))
           .setIcon(s.icon)
           .setChecked(this.tool === "shape" && this.shapeKind === s.id)
           .onClick(() => {
@@ -540,24 +613,24 @@ export class DefterView extends TextFileView {
       );
     }
     menu.addSeparator();
-    menu.addItem((i) => i.setTitle("Shift: straight lines, squares, circles").setDisabled(true));
-    menu.addItem((i) => i.setTitle("Tip: with the pen, draw a shape and hold still").setDisabled(true));
+    menu.addItem((i) => i.setTitle(T("Shift: straight lines, squares, circles")).setDisabled(true));
+    menu.addItem((i) => i.setTitle(T("Tip: with the pen, draw a shape and hold still")).setDisabled(true));
     menu.showAtMouseEvent(e);
   }
 
   private insertMenu(e: MouseEvent) {
     const menu = new Menu();
-    menu.addItem((i) => i.setTitle("Picture…").setIcon("image").setSection("insert").onClick(() => this.pickImage()));
-    menu.addItem((i) => i.setTitle("Sticky note").setIcon("sticky-note").setSection("insert").onClick(() => this.addNote()));
-    menu.addItem((i) => i.setTitle("Hide tape (click to reveal)").setIcon("rectangle-horizontal").setSection("insert").onClick(() => this.addTape()));
-    menu.addItem((i) => i.setTitle("Stickers and stamps…").setIcon("sticker").setSection("insert").onClick(() => this.openStickers()));
-    menu.addItem((i) => i.setTitle("Formula…").setIcon("sigma").setSection("insert").onClick(() => this.addFormula()));
-    menu.addItem((i) => i.setTitle("PDF pages…").setIcon("file-input").setSection("insert").onClick(() => this.importPdf()));
-    menu.addItem((i) => i.setTitle("Tip: paste a screenshot with Ctrl+V").setDisabled(true).setSection("insert"));
+    menu.addItem((i) => i.setTitle(T("Picture…")).setIcon("image").setSection("insert").onClick(() => this.pickImage()));
+    menu.addItem((i) => i.setTitle(T("Sticky note")).setIcon("sticky-note").setSection("insert").onClick(() => this.addNote()));
+    menu.addItem((i) => i.setTitle(T("Hide tape (click to reveal)")).setIcon("rectangle-horizontal").setSection("insert").onClick(() => this.addTape()));
+    menu.addItem((i) => i.setTitle(T("Stickers and stamps…")).setIcon("sticker").setSection("insert").onClick(() => this.openStickers()));
+    menu.addItem((i) => i.setTitle(T("Formula…")).setIcon("sigma").setSection("insert").onClick(() => this.addFormula()));
+    menu.addItem((i) => i.setTitle(T("PDF pages…")).setIcon("file-input").setSection("insert").onClick(() => this.importPdf()));
+    menu.addItem((i) => i.setTitle(T("Tip: paste a screenshot with Ctrl+V")).setDisabled(true).setSection("insert"));
     for (const t of [null, ...TEMPLATES]) {
       menu.addItem((i) =>
         i
-          .setTitle(t ? `Template: ${t.label}` : "Template: plain page")
+          .setTitle(t ? T("Template: {name}", { name: T(t.label) }) : T("Template: plain page"))
           .setIcon("layout-template")
           .setSection("template")
           .setChecked((this.page.tpl ?? null) === (t?.id ?? null))
@@ -566,12 +639,12 @@ export class DefterView extends TextFileView {
     }
     for (const c of MARK_COLORS) {
       menu.addItem((i) => {
-        i.setTitle(this.page.mark === c ? "Bookmarked" : "Bookmark this page").setIcon("bookmark").setSection("mark").onClick(() => this.setMark(c));
+        i.setTitle(T(this.page.mark === c ? "Bookmarked" : "Bookmark this page")).setIcon("bookmark").setSection("mark").onClick(() => this.setMark(c));
         const icon = (i as unknown as { iconEl?: HTMLElement }).iconEl;
         if (icon) icon.style.color = c;
       });
     }
-    if (this.page.mark) menu.addItem((i) => i.setTitle("Remove bookmark").setIcon("bookmark-minus").setSection("mark").onClick(() => this.setMark(undefined)));
+    if (this.page.mark) menu.addItem((i) => i.setTitle(T("Remove bookmark")).setIcon("bookmark-minus").setSection("mark").onClick(() => this.setMark(undefined)));
     menu.showAtMouseEvent(e);
   }
 
@@ -595,7 +668,7 @@ export class DefterView extends TextFileView {
     for (const c of colors) {
       const b = this.swatchesEl.createEl("button", { cls: "defter-swatch" });
       b.style.setProperty("--swatch", hl ? c : inkFor(c, this.look.tone));
-      b.setAttr("aria-label", hl ? "Highlighter colour" : INKS.find((i) => i.id === c)!.label);
+      b.setAttr("aria-label", T(hl ? "Highlighter colour" : INKS.find((i) => i.id === c)!.label));
       b.toggleClass("is-active", c === current);
       b.onclick = () => {
         if (hl) this.hlColor = c;
@@ -605,12 +678,12 @@ export class DefterView extends TextFileView {
     }
     if (this.tool === "pen" || this.tool === "pad") {
       const def = PEN_DEFS.find((p) => p.id === this.penKind)!;
-      const b = this.iconButton(this.widthsEl, def.icon, `Pen: ${def.label}`, (e) => {
+      const b = this.iconButton(this.widthsEl, def.icon, T("Pen: {name}", { name: T(def.label) }), (e) => {
         const menu = new Menu();
         for (const p of PEN_DEFS) {
           menu.addItem((i) =>
             i
-              .setTitle(p.label)
+              .setTitle(T(p.label))
               .setIcon(p.icon)
               .setChecked(p.id === this.penKind)
               .onClick(() => {
@@ -626,7 +699,7 @@ export class DefterView extends TextFileView {
     PEN_WIDTHS.forEach((w, i) => {
       const b = this.widthsEl.createEl("button", { cls: "defter-width" });
       b.style.setProperty("--dot", w * 2 + "px");
-      b.setAttr("aria-label", ["Fine", "Medium", "Bold"][i]);
+      b.setAttr("aria-label", T(["Fine", "Medium", "Bold"][i]));
       b.toggleClass("is-active", w === this.penWidth);
       b.onclick = () => {
         this.penWidth = w;
@@ -692,11 +765,11 @@ export class DefterView extends TextFileView {
     this.drawerEl = root.createDiv("defter-drawer");
     this.drawerEl.toggle(false);
     const head = this.drawerEl.createDiv("defter-drawer-head");
-    this.searchEl = head.createEl("input", { type: "search", cls: "defter-search", attr: { placeholder: "Search this notebook…" } });
-    this.iconButton(head, "x", "Close", () => this.drawerEl.toggle(false));
+    this.searchEl = head.createEl("input", { type: "search", cls: "defter-search", attr: { placeholder: T("Search this notebook…") } });
+    this.iconButton(head, "x", T("Close"), () => this.drawerEl.toggle(false));
     this.drawerTabs = this.drawerEl.createDiv("defter-drawer-tabs");
     for (const [id, label] of [["pages", "Pages"], ["grid", "Thumbnails"], ["todos", "To-dos"]] as const) {
-      const b = this.drawerTabs.createEl("button", { text: label, attr: { "data-mode": id } });
+      const b = this.drawerTabs.createEl("button", { text: T(label), attr: { "data-mode": id } });
       this.registerDomEvent(b, "click", () => {
         this.drawerMode = id;
         this.renderList();
@@ -745,7 +818,7 @@ export class DefterView extends TextFileView {
       row.toggleClass("has-mark", !!p.mark);
       row.createSpan({ cls: "defter-page-no", text: String(i + 1) });
       const body = row.createDiv("defter-page-body");
-      const title = pageTitle(p.text) || (p.ink.length || p.obj?.length ? "Drawing" : "Empty page");
+      const title = pageTitle(p.text) || T(p.ink.length || p.obj?.length ? "Drawing" : "Empty page");
       body.createDiv({ cls: "defter-page-title", text: title });
       if (p.date) body.createDiv({ cls: "defter-page-snippet", text: fmtDate(p.date, "ddd, D MMM YYYY") });
       if (q && at !== -1) {
@@ -755,7 +828,7 @@ export class DefterView extends TextFileView {
         snip.createEl("mark", { text: p.text.slice(at, at + q.length) });
         snip.appendText(p.text.slice(at + q.length, at + q.length + 40).replace(/\n/g, " "));
       } else if (q) {
-        body.createDiv({ cls: "defter-page-snippet", text: "Found in a sticky note" });
+        body.createDiv({ cls: "defter-page-snippet", text: T("Found in a sticky note") });
       }
       this.registerDomEvent(row, "click", () => {
         this.goTo(i);
@@ -769,7 +842,7 @@ export class DefterView extends TextFileView {
       if (!q) {
         const tools = row.createDiv("defter-page-tools");
         const btn = (icon: string, t: string, fn: () => void, enabled: boolean) => {
-          const b = this.iconButton(tools, icon, t, (e) => {
+          const b = this.iconButton(tools, icon, T(t), (e) => {
             e.stopPropagation();
             fn();
           });
@@ -831,12 +904,12 @@ export class DefterView extends TextFileView {
       }
     });
     if (!items.length) {
-      this.listEl.createDiv({ cls: "defter-empty", text: "No to-dos yet. Start a line with [ ] to make one." });
+      this.listEl.createDiv({ cls: "defter-empty", text: T("No to-dos yet. Start a line with [ ] to make one.") });
       return;
     }
     items.sort((a, b) => Number(a.done) - Number(b.done) || a.page - b.page);
     const open = items.filter((t) => !t.done).length;
-    this.listEl.createDiv({ cls: "defter-todo-sum", text: `${open} open · ${items.length - open} done` });
+    this.listEl.createDiv({ cls: "defter-todo-sum", text: T("{open} open · {done} done", { open, done: items.length - open }) });
     for (const t of items) {
       const row = this.listEl.createDiv("defter-todo-row");
       row.toggleClass("is-done", t.done);
@@ -882,7 +955,7 @@ export class DefterView extends TextFileView {
     this.textEl.value = text;
     this.prevText = text;
     this.textEl.placeholder =
-      i === 0 && this.nb.pages.length === 1 && !page.tpl ? "Start writing… (# heading, **bold**, ==mark==, - list, [[link]])" : "";
+      i === 0 && this.nb.pages.length === 1 && !page.tpl ? T("Start writing… (# heading, **bold**, ==mark==, - list, [[link]], [ ] to-do, front :: back card)") : "";
     this.mirrorEl.empty();
     this.spans = [];
     this.spliceSpans(0, 0, text, false);
@@ -902,7 +975,7 @@ export class DefterView extends TextFileView {
     const label = `${this.pageIndex + 1} / ${this.nb.pages.length}`;
     this.counterEl.setText(label);
     const date = this.page.date;
-    this.chipEl?.setText(date ? `${fmtDate(date, "D MMM")} · ${label}` : `p. ${label}`);
+    this.chipEl?.setText(date ? `${fmtDate(date, "D MMM")} · ${label}` : T("p. {n}", { n: label }));
   }
 
   onResize() {
@@ -920,7 +993,7 @@ export class DefterView extends TextFileView {
       tab.style.setProperty("--mark", p.mark);
       tab.style.top = 90 + k++ * 62 + "px";
       tab.toggleClass("is-current", i === this.pageIndex);
-      tab.setAttr("aria-label", pageTitle(p.text) || `Page ${i + 1}`);
+      tab.setAttr("aria-label", pageTitle(p.text) || T("Page {n}", { n: i + 1 }));
       tab.onclick = () => this.goTo(i);
     });
   }
@@ -970,7 +1043,7 @@ export class DefterView extends TextFileView {
     const p = this.nb.pages[i];
     if (this.nb.pages.length === 1) return;
     if (p.text.trim() || p.ink.length || p.obj?.length) {
-      new Notice("Clear the page before removing it.");
+      new Notice(T("Clear the page before removing it."));
       return;
     }
     this.nb.pages.splice(i, 1);
@@ -988,7 +1061,7 @@ export class DefterView extends TextFileView {
     this.redoStack = [];
     this.requestSave();
     this.goTo(i + 1);
-    new Notice(`Page ${i + 1} duplicated.`);
+    new Notice(T("Page {n} duplicated.", { n: i + 1 }));
   }
 
   /** A page that only holds text carried over from the page before. */
@@ -1013,7 +1086,7 @@ export class DefterView extends TextFileView {
       n++;
     }
     if (!n) {
-      new Notice("The next page has drawings, a template or a bookmark, so nothing was moved.");
+      new Notice(T("The next page has drawings, a template or a bookmark, so nothing was moved."));
       return;
     }
     const before = pages.length;
@@ -1029,7 +1102,7 @@ export class DefterView extends TextFileView {
     }
     this.showPage(i);
     this.requestSave();
-    new Notice(`Done: ${before - pages.length > 0 ? before - pages.length + " page(s) fewer" : "pages refilled"}.`);
+    new Notice(before - pages.length > 0 ? T("Done: {n} page(s) fewer.", { n: before - pages.length }) : T("Done: pages refilled."));
   }
 
   private movePage(i: number, dir: number) {
@@ -1086,6 +1159,8 @@ export class DefterView extends TextFileView {
         if (!el) continue;
         if (flags[i]) el.dataset.f = flags[i];
         else delete el.dataset.f;
+        if (/\b(sup|sub)\b/.test(flags[i])) el.dataset.c = el.textContent ?? "";
+        else delete el.dataset.c;
       }
       start = lineEnd + 1;
     }
@@ -1107,12 +1182,96 @@ export class DefterView extends TextFileView {
     this.page.text = next;
   }
 
-  private onTextInput() {
+  private onTextInput(e?: InputEvent) {
+    // Maths shortcuts: \sqrt → √, <= → ≤ … (typing only, never on paste).
+    if ((e?.inputType === "insertText" || e?.inputType === "insertLineBreak") && this.host.settings.mathShortcuts) {
+      const ta = this.textEl;
+      const r = shortcutAt(ta.value, ta.selectionStart);
+      if (r && ta.selectionStart === ta.selectionEnd) {
+        const after = ta.selectionStart - r[1]; // the typed terminator, if any
+        ta.setSelectionRange(r[0], r[1]);
+        // execCommand keeps the text field's own undo working.
+        document.execCommand("insertText", false, r[2]);
+        const caret = r[0] + r[2].length + after;
+        ta.setSelectionRange(caret, caret);
+        return;
+      }
+    }
     this.syncMirror(true);
     this.fitText(true);
     this.requestSave();
     this.renderCardsBtn();
     if (this.studyMode) this.applyStudy();
+  }
+
+  /** Tab after "12*3+4 =" writes the result. */
+  private onTextKey(e: KeyboardEvent) {
+    if (e.key !== "Tab" || e.shiftKey || e.ctrlKey || e.altKey || !this.host.settings.calculator) return;
+    const ta = this.textEl;
+    const pos = ta.selectionStart;
+    if (pos !== ta.selectionEnd) return;
+    const start = ta.value.lastIndexOf("\n", pos - 1) + 1;
+    const res = calcLine(ta.value.slice(start, pos));
+    if (!res) return;
+    e.preventDefault();
+    const gap = ta.value[pos - 1] === " " ? "" : " ";
+    document.execCommand("insertText", false, gap + res.answer);
+  }
+
+  /** Inserts text at the caret (switching to writing), caret moved back by `back`. */
+  insertAtCaret(text: string, back = 0) {
+    if (this.tool !== "write") this.setTool("write");
+    const ta = this.textEl;
+    ta.focus({ preventScroll: true });
+    document.execCommand("insertText", false, text);
+    if (back) ta.setSelectionRange(ta.selectionStart - back, ta.selectionStart - back);
+  }
+
+  private mathPanel: HTMLElement | null = null;
+
+  /** The Σ panel: symbols to click, grouped, with their typing shortcuts. */
+  private toggleMathPanel() {
+    if (this.mathPanel) {
+      this.mathPanel.remove();
+      this.mathPanel = null;
+      return;
+    }
+    const panel = this.contentEl.createDiv("defter-math-panel");
+    this.mathPanel = panel;
+    const short: Record<string, string> = {};
+    for (const [k, v] of Object.entries(MATH_NAMED)) short[v] ??= "\\" + k;
+    for (const [op, sym] of MATH_OPERATORS) short[sym] ??= op;
+    const groups: [string, string[]][] = [
+      ["Basic", ["√()", "∛()", "x²", "x³", "^", "_", "½", "π", "°", "±", "×", "÷", "·", "%"]],
+      ["Compare", ["=", "≠", "≈", "<", ">", "≤", "≥", "∞"]],
+      ["Logic and sets", ["→", "⇒", "⇔", "∈", "∉", "⊂", "∪", "∩", "∅", "∀", "∃", "ℝ", "ℕ", "ℤ", "ℚ"]],
+      ["Geometry", ["∠", "⊥", "∥", "△", "°"]],
+      ["Greek", ["α", "β", "γ", "δ", "Δ", "θ", "λ", "μ", "σ", "Σ", "ω", "Ω", "φ", "ε", "∑", "∫"]],
+    ];
+    for (const [title, syms] of groups) {
+      panel.createDiv({ cls: "defter-math-title", text: T(title) });
+      const grid = panel.createDiv("defter-math-grid");
+      for (const sym of syms) {
+        const b = grid.createEl("button", { cls: "defter-math-key", text: sym.replace("x²", "x²").replace("()", "") });
+        const tip = short[sym.replace("()", "")];
+        if (tip) b.setAttr("aria-label", tip);
+        b.onmousedown = (e) => e.preventDefault();
+        b.onclick = () => {
+          if (sym.endsWith("()")) this.insertAtCaret(sym, 1);
+          else if (sym === "x²") this.insertAtCaret("²");
+          else if (sym === "x³") this.insertAtCaret("³");
+          else this.insertAtCaret(sym);
+        };
+      }
+    }
+    const foot = panel.createDiv("defter-math-foot");
+    foot.createDiv({ text: T("Type \\sqrt, \\pi, <=, != … and they turn into symbols. x^2 is drawn small and high.") });
+    if (this.host.settings.calculator) foot.createDiv({ text: T("Calculator: write 12*3+4 = and press Tab.") });
+    const f = foot.createEl("button", { text: T("Formula…") });
+    f.onclick = () => {
+      this.toggleMathPanel();
+      this.addFormula();
+    };
   }
 
   private toggleCheckbox(page: number, at: number) {
@@ -1239,7 +1398,7 @@ export class DefterView extends TextFileView {
       const [cx, cy] = this.visibleCentre();
       this.addObject({ k: "img", x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h, v: img.path });
     } catch (e) {
-      new Notice("Could not add the picture: " + (e as Error).message);
+      new Notice(T("Could not add the picture: ") + (e as Error).message);
     }
   }
 
@@ -1321,7 +1480,7 @@ export class DefterView extends TextFileView {
     const sticker: Sticker = { id: Date.now().toString(36), ink, obj, w: Math.round(b.x2 - b.x1), h: Math.round(b.y2 - b.y1) };
     this.host.settings.stickers.push(sticker);
     void this.host.saveSettings();
-    new Notice("Saved as a sticker. Find it under Insert → Stickers, in every notebook.");
+    new Notice(T("Saved as a sticker. Find it under Insert → Stickers, in every notebook."));
   }
 
   private addFormula() {
@@ -1358,10 +1517,10 @@ export class DefterView extends TextFileView {
   private objectMenu(e: MouseEvent, o: PageObject) {
     const menu = new Menu();
     if (o.k === "note") {
-      menu.addItem((i) => i.setTitle("Edit text").setIcon("pencil").onClick(() => this.editNote(o)));
+      menu.addItem((i) => i.setTitle(T("Edit text")).setIcon("pencil").onClick(() => this.editNote(o)));
       for (const c of NOTE_COLORS) {
         menu.addItem((i) => {
-          i.setTitle("Note colour").setIcon("square").setSection("colour").onClick(() => {
+          i.setTitle(T("Note colour")).setIcon("square").setSection("colour").onClick(() => {
             this.snapshot();
             o.c = c;
             this.requestSave();
@@ -1375,7 +1534,7 @@ export class DefterView extends TextFileView {
     if (o.k === "tape" || o.k === "stamp") {
       for (const c of o.k === "tape" ? TAPE_COLORS : STAMP_COLORS) {
         menu.addItem((i) => {
-          i.setTitle(o.k === "tape" ? "Tape colour" : "Stamp colour").setIcon("square").setSection("colour").onClick(() => {
+          i.setTitle(T(o.k === "tape" ? "Tape colour" : "Stamp colour")).setIcon("square").setSection("colour").onClick(() => {
             this.snapshot();
             o.c = c;
             this.requestSave();
@@ -1388,7 +1547,7 @@ export class DefterView extends TextFileView {
     }
     if (o.k === "tex") {
       menu.addItem((i) =>
-        i.setTitle("Edit formula").setIcon("pencil").onClick(() =>
+        i.setTitle(T("Edit formula")).setIcon("pencil").onClick(() =>
           new TexModal(this.app, o.v, (tex, w, h) => {
             this.snapshot();
             const ratio = o.h / Math.max(1, h);
@@ -1403,7 +1562,7 @@ export class DefterView extends TextFileView {
     }
     menu.addItem((i) =>
       i
-        .setTitle("Delete")
+        .setTitle(T("Delete"))
         .setIcon("trash-2")
         .setWarning(true)
         .setSection("danger")
@@ -1467,13 +1626,13 @@ export class DefterView extends TextFileView {
     stop(bar);
     if (this.sel.strokes.size) {
       for (const ink of INKS) {
-        const sw = bar.createEl("button", { cls: "defter-swatch", attr: { "aria-label": `Recolour: ${ink.label}` } });
+        const sw = bar.createEl("button", { cls: "defter-swatch", attr: { "aria-label": T("Recolour: {name}", { name: T(ink.label) }) } });
         sw.style.setProperty("--swatch", inkFor(ink.id, this.look.tone));
         sw.onclick = () => this.recolor(ink.id);
       }
     }
     const btn = (icon: string, label: string, fn: () => void) => {
-      const el = bar.createEl("button", { cls: "defter-btn clickable-icon", attr: { "aria-label": label } });
+      const el = bar.createEl("button", { cls: "defter-btn clickable-icon", attr: { "aria-label": T(label) } });
       setIcon(el, icon);
       el.onclick = fn;
     };
@@ -1497,7 +1656,7 @@ export class DefterView extends TextFileView {
     clipboard = { id, ink: clone([...this.sel.strokes]), obj: clone([...this.sel.objs]) };
     // The system clipboard gets a marker, so Ctrl+V knows our drawing is the newest copy.
     void navigator.clipboard.writeText(CLIP_MARK + id).catch(() => undefined);
-    new Notice("Copied. Paste with Ctrl+V on any page.");
+    new Notice(T("Copied. Paste with Ctrl+V on any page."));
   }
 
   private duplicateSelection() {
@@ -2010,13 +2169,13 @@ export class DefterView extends TextFileView {
     const path = this.file.path;
     const cards = parseCards(this.nb.pages);
     if (!cards.length) {
-      new Notice("No flashcards yet. Write a line like “mol :: 6.02 × 10²³ particles”, then press this again.", 8000);
+      new Notice(T("No flashcards yet. Write a line like “mol :: 6.02 × 10²³ particles”, then press this again."), 8000);
       return;
     }
     const today = todayStr();
     const due = cards.filter((c) => isDue(this.host.cardState(path, c.front), today));
     if (!due.length) {
-      new Notice(`All ${cards.length} cards are learned for today. Come back tomorrow.`);
+      new Notice(T("All {n} cards are learned for today. Come back tomorrow.", { n: cards.length }));
       return;
     }
     new StudyModal(this.app, due.map((card) => ({ card, path, notebook: this.getDisplayText() })), this.host).open();
@@ -2028,7 +2187,7 @@ export class DefterView extends TextFileView {
     this.studyBtn?.toggleClass("is-active", this.studyMode);
     this.sheetEl.toggleClass("is-study", this.studyMode);
     this.applyStudy();
-    new Notice(this.studyMode ? "Study mode: highlighted text and card answers are hidden. Click to reveal." : "Study mode off.");
+    new Notice(T(this.studyMode ? "Study mode: highlighted text and card answers are hidden. Click to reveal." : "Study mode off."));
   }
 
   /** Character ranges hidden in study mode: ==marks==, card answers and text under highlighter. */
@@ -2100,7 +2259,7 @@ export class DefterView extends TextFileView {
   private toggleFocus() {
     this.focusMode = !this.focusMode;
     this.containerEl.toggleClass("defter-focus", this.focusMode);
-    if (this.focusMode) new Notice("Focus mode. Esc or Alt+F to leave.");
+    if (this.focusMode) new Notice(T("Focus mode. Esc or Alt+F to leave."));
     requestAnimationFrame(() => this.fitToPane());
   }
 
@@ -2111,7 +2270,7 @@ export class DefterView extends TextFileView {
     importPdf(this.app, this.file, (imported) => {
       if (!imported.length) return;
       const empty = this.nb.pages.length === 1 && !this.page.text.trim() && !this.page.ink.length && !this.page.obj?.length && !this.page.bg;
-      const pages: Page[] = imported.map((im) => ({ text: "", ink: [], bg: im.path }));
+      const pages: Page[] = imported.map((im) => ({ text: T(""), ink: [], bg: im.path }));
       if (empty) this.nb.pages.splice(0, 1, ...pages);
       else this.nb.pages.splice(this.pageIndex + 1, 0, ...pages);
       this.undoStack = [];
@@ -2120,7 +2279,7 @@ export class DefterView extends TextFileView {
       const first = empty ? 0 : this.pageIndex + 1;
       if (empty) this.showPage(0);
       else this.goTo(first);
-      new Notice(`${imported.length} PDF page(s) added. Write or draw on them like any page.`);
+      new Notice(T("{n} PDF page(s) added. Write or draw on them like any page.", { n: imported.length }));
     });
   }
 
@@ -2128,7 +2287,7 @@ export class DefterView extends TextFileView {
   private async pageImage(mode: "copy" | "save") {
     const remote = getRemote();
     if (!remote) {
-      new Notice("Page images need the Obsidian desktop app.");
+      new Notice(T("Page images need the Obsidian desktop app."));
       return;
     }
     this.finishStroke();
@@ -2150,15 +2309,15 @@ export class DefterView extends TextFileView {
           // The web clipboard needs a focused window; Electron's own does not.
           this.electronCopy(png);
         }
-        new Notice("Page copied as an image.");
+        new Notice(T("Page copied as an image."));
       } else if (this.file) {
         const name = `${this.getDisplayText()} p${this.pageIndex + 1}.png`;
         const path = await this.app.fileManager.getAvailablePathForAttachment(name, this.file.path);
         await this.app.vault.createBinary(normalizePath(path), new Uint8Array(png).buffer);
-        new Notice(`Saved ${path}`);
+        new Notice(T("Saved {path}", { path }));
       }
     } catch (e) {
-      new Notice("Could not make the image: " + (e as Error).message);
+      new Notice(T("Could not make the image: ") + (e as Error).message);
     } finally {
       cover.remove();
     }
@@ -2242,14 +2401,14 @@ export class DefterView extends TextFileView {
     const page = this.nb.pages[partner];
     if (page) {
       renderStaticPage(this.app, wrap, this.getDisplayText(), page, partner + 1, this.look);
-      wrap.setAttr("aria-label", `Page ${partner + 1}: click to write here`);
+      wrap.setAttr("aria-label", T("Page {n}: click to write here", { n: partner + 1 }));
       wrap.onclick = () => this.goTo(partner, false);
     } else {
       const blank = wrap.createDiv("defter-sheet defter-static-sheet defter-blank-page");
       applyDims(blank, this.dims);
       blank.dataset.paper = this.look.paper;
       blank.dataset.tone = this.look.tone;
-      blank.createDiv({ cls: "defter-blank-hint", text: "+ New page" });
+      blank.createDiv({ cls: "defter-blank-hint", text: T("+ New page") });
       wrap.onclick = () => this.addPage();
     }
     this.layoutSpread();
@@ -2296,5 +2455,205 @@ export class DefterView extends TextFileView {
     this.turnEl = wrap;
     wrap.addEventListener("animationend", () => wrap.remove(), { once: true });
     setTimeout(() => wrap.remove(), 900);
+  }
+
+  // ---- Private notebooks ------------------------------------------------------
+
+  get isPrivate() {
+    return !!this.lock;
+  }
+
+  private showLockScreen(data: string) {
+    this.errorEl.toggle(false);
+    this.deskEl.toggle(false);
+    this.dockEl.toggle(false);
+    this.drawerEl.toggle(false);
+    this.lockBtn?.toggle(false);
+    this.pad?.close();
+    // Nothing about the pages shows while locked.
+    this.chipEl?.setText(T("Locked"));
+    this.cardsBtn?.setAttr("data-count", "");
+    this.cardsBtn?.removeClass("has-count");
+    this.calendarBtn?.toggle(false);
+    const el = this.lockEl;
+    el.empty();
+    el.toggle(true);
+    let parsed: ReturnType<typeof parseLocked>;
+    try {
+      parsed = parseLocked(data);
+    } catch (e) {
+      el.createDiv({ cls: "defter-lock-error", text: (e as Error).message });
+      return;
+    }
+    const card = el.createDiv("defter-lock-card");
+    setIcon(card.createDiv("defter-lock-icon"), "lock");
+    card.createDiv({ cls: "defter-lock-title", text: this.getDisplayText() });
+    card.createDiv({ cls: "defter-lock-sub", text: T("Private notebook") });
+    if (parsed.data.hint) card.createDiv({ cls: "defter-lock-hint", text: T("Hint: {hint}", { hint: parsed.data.hint }) });
+    let recovery = false;
+    const input = card.createEl("input", { type: "password", cls: "defter-lock-input", attr: { placeholder: T("Password"), autocomplete: "off" } });
+    const error = card.createDiv("defter-lock-error");
+    const btn = card.createEl("button", { cls: "mod-cta", text: T("Unlock") });
+    const forgot = card.createEl("a", { cls: "defter-lock-forgot", text: T("Forgot the password? Use the recovery key") });
+    const go = async () => {
+      if (!input.value) return;
+      btn.disabled = true;
+      btn.setText(T("Unlocking…"));
+      error.setText("");
+      try {
+        const r = recovery ? await unlockWithRecovery(parsed.data, input.value) : await unlockWithPassword(parsed.data, input.value);
+        this.unlocked(r.session, r.text, data);
+        if (recovery) {
+          new Notice(T("Opened with the recovery key. Choose a new password."));
+          this.changePassword();
+        }
+      } catch (e) {
+        error.setText(e instanceof WrongSecretError ? T(recovery ? "That recovery key is not right." : "Wrong password.") : (e as Error).message);
+        input.select();
+      } finally {
+        btn.disabled = false;
+        btn.setText(T("Unlock"));
+      }
+    };
+    btn.onclick = () => void go();
+    input.addEventListener("keydown", (e) => e.key === "Enter" && void go());
+    forgot.onclick = () => {
+      recovery = !recovery;
+      input.type = recovery ? "text" : "password";
+      input.placeholder = T(recovery ? "Recovery key, e.g. ABCD-EFGH-…" : "Password");
+      forgot.setText(T(recovery ? "Use the password instead" : "Forgot the password? Use the recovery key"));
+      input.value = "";
+      input.focus();
+    };
+    setTimeout(() => input.focus(), 50);
+  }
+
+  private unlocked(session: LockSession, text: string, sealed: string) {
+    this.lock = session;
+    this.sealed = sealed;
+    this.rawBroken = null;
+    this.lastActive = Date.now();
+    this.lockEl.toggle(false);
+    this.loadText(text, true);
+  }
+
+  /** The file changed while open (another device, our own save): read it again. */
+  private async reopenLocked(data: string) {
+    const lock = this.lock;
+    if (!lock) return;
+    try {
+      const session = { key: lock.key, data: parseLocked(data).data };
+      const text = await openNotebookText(session);
+      this.lock = session;
+      this.sealed = data;
+      this.rawBroken = null;
+      this.loadText(text, false);
+    } catch {
+      this.lock = null;
+      this.showLockScreen(data);
+    }
+  }
+
+  async lockNow() {
+    if (!this.lock) return;
+    await this.save();
+    const sealed = this.sealed;
+    this.lock = null;
+    this.nb = emptyNotebook();
+    this.mirrorEl.empty();
+    this.spans = [];
+    this.textEl.value = "";
+    this.undoStack = [];
+    this.redoStack = [];
+    if (sealed) {
+      this.rawBroken = sealed;
+      this.showLockScreen(sealed);
+    }
+  }
+
+  private makePrivate() {
+    new PasswordModal(this.app, "Make this notebook private", (pw, hint) => {
+      void (async () => {
+        const { session, recovery } = await createLock(pw, hint || undefined);
+        const pictures = this.nb.pages.some((p) => p.bg || p.obj?.some((o) => o.k === "img"));
+        new RecoveryModal(
+          this.app,
+          recovery,
+          () => {
+            void (async () => {
+              this.lock = session;
+              this.lockBtn?.toggle(true);
+              await this.save();
+              new Notice(T("This notebook is now private. Its pages are encrypted in the file."));
+            })();
+          },
+          pictures ? T("Pictures and PDF pages are separate files in the vault and are not encrypted.") : undefined
+        ).open();
+      })();
+    }).open();
+  }
+
+  private changePassword() {
+    const lock = this.lock;
+    if (!lock) return;
+    new PasswordModal(this.app, "Change password", (pw, hint) => {
+      void (async () => {
+        await changePassword(lock, pw, hint || undefined);
+        await this.save();
+        new Notice(T("Password changed. Your recovery key still works."));
+      })();
+    }).open();
+  }
+
+  private async newRecovery() {
+    const lock = this.lock;
+    if (!lock) return;
+    // Work on a copy: closing the window without confirming keeps the old key.
+    const draft: LockSession = { key: lock.key, data: { ...lock.data } };
+    const code = await renewRecovery(draft);
+    new RecoveryModal(this.app, code, () => {
+      lock.data.wr = draft.data.wr;
+      void this.save().then(() => new Notice(T("New recovery key saved. The old one no longer works.")));
+    }).open();
+  }
+
+  private removeLock() {
+    new PasswordConfirm(this.app, () => {
+      void (async () => {
+        this.lock = null;
+        this.sealed = null;
+        this.nb.frontmatter = setProp(this.nb.frontmatter, LOCK_KEY, null);
+        this.lockBtn?.toggle(false);
+        await this.save();
+        new Notice(T("The password was removed. This notebook is a normal file again."));
+      })();
+    }).open();
+  }
+}
+
+/** "Are you sure?" before a private notebook becomes plain text again. */
+class PasswordConfirm extends Modal {
+  private ok: () => void;
+  constructor(app: App, ok: () => void) {
+    super(app);
+    this.ok = ok;
+  }
+  onOpen() {
+    this.titleEl.setText(T("Remove the password?"));
+    this.contentEl.createEl("p", { text: T("The notebook will be saved as plain text again. Anyone with access to the vault can read it.") });
+    new Setting(this.contentEl)
+      .addButton((b) => b.setButtonText(T("Cancel")).onClick(() => this.close()))
+      .addButton((b) =>
+        b
+          .setButtonText(T("Remove password"))
+          .setWarning()
+          .onClick(() => {
+            this.close();
+            this.ok();
+          })
+      );
+  }
+  onClose() {
+    this.contentEl.empty();
   }
 }
