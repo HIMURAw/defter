@@ -1,4 +1,4 @@
-import { Menu, Notice, TextFileView, setIcon, type WorkspaceLeaf } from "obsidian";
+import { Menu, Notice, Scope, TextFileView, normalizePath, setIcon, type WorkspaceLeaf } from "obsidian";
 import {
   emptyNotebook,
   emptyPage,
@@ -10,15 +10,40 @@ import {
   type Notebook,
   type Page,
   type PageObject,
+  type PenKind,
   type ShapeKind,
   type Stroke,
   type StrokeKind,
 } from "./format";
-import { applyDims, pageDims, drawStrokes, fontMetrics, lineFormats, linkAt, snapShape, strokePoints, wobble, type PageDims } from "./render";
-import { ANIM, HIGHLIGHTS, INKS, inkFor, resolveLook, type DefterSettings, type NotebookLook } from "./settings";
+import {
+  LINE,
+  TEXT_TOP,
+  applyDims,
+  checkboxAt,
+  drawStrokes,
+  fontMetrics,
+  lineFormats,
+  linkAt,
+  pageDims,
+  recognizeShape,
+  smoothPoints,
+  snapShape,
+  strokePoints,
+  wobble,
+  type PageDims,
+} from "./render";
+import { ANIM, HIGHLIGHTS, INKS, fmtDate, inkFor, resolveLook, type DefterSettings, type NotebookLook, type Sticker } from "./settings";
+import { parseCards, isDue, type CardState } from "./cards";
+import { StudyModal, type StudyHost } from "./study-modal";
+import type { StudyTimer } from "./timer";
+import { WritePad } from "./write-pad";
+import { importPdf } from "./pdf-import";
+import { HelpModal, StickerModal } from "./panels";
+import { renderStaticPage } from "./static-page";
+import { getRemote } from "./pdf";
 import { NotebookSettingsModal } from "./notebook-settings";
 import { applyBox, drawDecor, drawObjects, pageBox } from "./page-decor";
-import { NOTE_COLORS, TexModal, hitObject, saveImage } from "./objects";
+import { NOTE_COLORS, STAMP_COLORS, TAPE_COLORS, TexModal, hitObject, saveImage } from "./objects";
 import { TEMPLATES } from "./templates";
 import { CalendarModal, todayStr } from "./new-notebook";
 
@@ -32,13 +57,36 @@ const UNDO_LIMIT = 100;
 const ANIMATE_LIMIT = 40;
 const MARK_COLORS = ["#e8574d", "#f2a541", "#4fb06d", "#4f8fe0", "#9b6ad6"];
 
-type Tool = "write" | "pen" | "hl" | "shape" | "erase" | "select";
+type Tool = "write" | "pen" | "hl" | "shape" | "erase" | "select" | "pad";
 
 const SHAPE_DEFS: { id: ShapeKind; label: string; icon: string }[] = [
   { id: "line", label: "Line", icon: "minus" },
   { id: "arrow", label: "Arrow", icon: "move-up-right" },
   { id: "rect", label: "Box", icon: "square" },
+  { id: "ellipse", label: "Circle / ellipse", icon: "circle" },
+  { id: "tri", label: "Triangle", icon: "triangle" },
 ];
+
+const PEN_DEFS: { id: PenKind | "ball"; label: string; icon: string }[] = [
+  { id: "ball", label: "Ballpoint", icon: "pen-line" },
+  { id: "fountain", label: "Fountain pen", icon: "pen-tool" },
+  { id: "pencil", label: "Pencil", icon: "pencil" },
+  { id: "dash", label: "Dashed", icon: "ellipsis" },
+];
+
+const ZOOMS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 2.5, 3];
+/** Held still this long, a freehand line becomes a clean shape. */
+const HOLD_MS = 600;
+/** What the system clipboard holds after copying a selection. */
+const CLIP_MARK = "defter-selection:";
+
+interface ElectronClip {
+  clipboard: { writeImage(img: unknown): void };
+  nativeImage: { createFromBuffer(b: unknown): unknown };
+}
+
+/** Copied strokes and objects, shared by every open notebook. */
+let clipboard: { id: string; ink: Stroke[]; obj: PageObject[] } | null = null;
 
 interface HistoryEntry {
   page: number;
@@ -56,8 +104,10 @@ type Drag =
   | { kind: "move"; x: number; y: number; moved: boolean }
   | { kind: "resize"; obj: PageObject; x: number; y: number; w: number; h: number; ratio: number };
 
-export interface DefterHost {
+export interface DefterHost extends StudyHost {
   settings: DefterSettings;
+  timer: StudyTimer;
+  saveSettings(): Promise<void>;
   openAsMarkdown(leaf: WorkspaceLeaf): void;
   rememberPage(path: string, page: number): void;
   exportPdf(title: string, nb: Notebook, look: NotebookLook): Promise<void>;
@@ -97,6 +147,19 @@ export class DefterView extends TextFileView {
   private penColor = INKS[0].id;
   private hlColor = HIGHLIGHTS[0];
   private penWidth = PEN_WIDTHS[1];
+  private penKind: PenKind | "ball" = "ball";
+  private zoom = 1;
+  private pad: WritePad | null = null;
+  private studyMode = false;
+  /** Study mode: hidden groups the user clicked open (stroke objects or text offsets). */
+  private revealed = new Set<unknown>();
+  private holdTimer = 0;
+  private snapped = false;
+  private focusMode = false;
+  private drawerMode: "pages" | "grid" | "todos" = "pages";
+  private partnerEl: HTMLElement | null = null;
+  private partnerIndex = -1;
+  private turnEl: HTMLElement | null = null;
   private undoStack: HistoryEntry[] = [];
   private redoStack: HistoryEntry[] = [];
   private spans: HTMLSpanElement[] = [];
@@ -130,6 +193,11 @@ export class DefterView extends TextFileView {
   private counterEl!: HTMLElement;
   private chipEl: HTMLElement | null = null;
   private calendarBtn: HTMLElement | null = null;
+  private studyBtn: HTMLElement | null = null;
+  private cardsBtn: HTMLElement | null = null;
+  private timerBtn: HTMLElement | null = null;
+  private zoomEl!: HTMLElement;
+  private drawerTabs!: HTMLElement;
   private drawerEl!: HTMLElement;
   private searchEl!: HTMLInputElement;
   private listEl!: HTMLElement;
@@ -137,6 +205,18 @@ export class DefterView extends TextFileView {
   constructor(leaf: WorkspaceLeaf, host: DefterHost) {
     super(leaf);
     this.host = host;
+    // Ctrl+D is an Obsidian hotkey (delete paragraph); in a notebook it duplicates the selection.
+    this.scope = new Scope(this.app.scope);
+    // F1 opens Obsidian's help elsewhere; in a notebook it lists the shortcuts.
+    this.scope.register([], "F1", () => {
+      new HelpModal(this.app).open();
+      return false;
+    });
+    this.scope.register(["Mod"], "d", () => {
+      if (this.tool !== "select") return true;
+      this.duplicateSelection();
+      return false;
+    });
   }
 
   getViewType() {
@@ -155,6 +235,9 @@ export class DefterView extends TextFileView {
 
   async onOpen() {
     this.addAction("sliders-horizontal", "Notebook settings", () => this.openSettings());
+    this.timerBtn = this.addAction("timer", "Study timer", (e) => this.host.timer.menu(e, this.file?.path, this.getDisplayText()));
+    this.cardsBtn = this.addAction("layers", "Study flashcards (front :: back lines)", () => this.studyCards());
+    this.studyBtn = this.addAction("eye-off", "Study mode: hide highlighted text and card answers (Alt+S)", () => this.toggleStudy());
     this.addAction("list", "Pages", () => this.toggleDrawer(false));
     this.addAction("search", "Search this notebook", () => this.toggleDrawer(true));
     this.calendarBtn = this.addAction("calendar-days", "Journal calendar", () => this.openCalendar());
@@ -166,14 +249,30 @@ export class DefterView extends TextFileView {
       this.registerDomEvent(this.chipEl, "click", () => this.toggleDrawer(false));
     }
     this.ensureUi();
+    this.register(this.host.timer.onChange(() => this.renderTimer()));
+    this.renderTimer();
+  }
+
+  private renderTimer() {
+    const r = this.host.timer.running;
+    const mine = !!r && r.path === this.file?.path;
+    this.timerBtn?.toggleClass("is-running", mine);
+    this.timerBtn?.setAttr("data-label", mine ? this.host.timer.label() : "");
   }
 
   onPaneMenu(menu: Menu, source: string) {
     if (source === "more-options" || source === "tab-header") {
       menu.addItem((i) => i.setSection("action").setTitle("Notebook settings").setIcon("sliders-horizontal").onClick(() => this.openSettings()));
       menu.addItem((i) => i.setSection("action").setTitle("Add page after this one").setIcon("file-plus").onClick(() => this.addPage()));
+      menu.addItem((i) => i.setSection("action").setTitle("Duplicate this page").setIcon("copy").onClick(() => this.duplicatePage(this.pageIndex)));
       menu.addItem((i) => i.setSection("action").setTitle("Remove this page").setIcon("file-minus").onClick(() => this.removePage(this.pageIndex)));
+      menu.addItem((i) => i.setSection("action").setTitle("Import PDF pages…").setIcon("file-input").onClick(() => this.importPdf()));
+      menu.addItem((i) => i.setSection("action").setTitle("Pull text back from the next pages").setIcon("wrap-text").onClick(() => this.reflow()));
       menu.addItem((i) => i.setSection("action").setTitle("Export to PDF").setIcon("file-output").onClick(() => this.exportPdf()));
+      menu.addItem((i) => i.setSection("action").setTitle("Copy page as image").setIcon("image").onClick(() => void this.pageImage("copy")));
+      menu.addItem((i) => i.setSection("action").setTitle("Save page as PNG").setIcon("image-down").onClick(() => void this.pageImage("save")));
+      menu.addItem((i) => i.setSection("view").setTitle("Focus mode (Alt+F)").setIcon("maximize").onClick(() => this.toggleFocus()));
+      menu.addItem((i) => i.setSection("view").setTitle("Keyboard shortcuts (F1)").setIcon("keyboard").onClick(() => new HelpModal(this.app).open()));
       menu.addItem((i) => i.setSection("action").setTitle("Open as Markdown").setIcon("file-text").onClick(() => this.host.openAsMarkdown(this.leaf)));
     }
     super.onPaneMenu(menu, source);
@@ -212,7 +311,9 @@ export class DefterView extends TextFileView {
     this.pageIndex = Math.max(0, Math.min(this.pageIndex, this.nb.pages.length - 1));
     this.calendarBtn?.toggle(this.journal);
     if (clear && this.journal) this.pageIndex = this.journalPage(todayStr());
+    if (clear) this.revealed.clear();
     this.applyLook();
+    this.renderCardsBtn();
   }
 
   clear() {
@@ -309,6 +410,8 @@ export class DefterView extends TextFileView {
     const root = this.contentEl;
     root.empty();
     root.addClass("defter-root");
+    // Focusable, so shortcuts work while drawing (the canvas itself takes no focus).
+    root.tabIndex = -1;
     this.errorEl = root.createDiv("defter-error");
     this.errorEl.toggle(false);
 
@@ -328,6 +431,7 @@ export class DefterView extends TextFileView {
     this.tabsEl = this.sheetEl.createDiv("defter-tabs");
     this.pageNoEl = this.sheetEl.createDiv("defter-pageno");
     this.sizeCanvases();
+    this.registerDomEvent(this.objHighEl, "click", (e) => this.onObjectClick(e));
 
     this.buildDock(root);
     this.buildDrawer(root);
@@ -342,9 +446,10 @@ export class DefterView extends TextFileView {
     this.registerDomEvent(this.inkCanvas, "contextmenu", (e) => e.preventDefault());
     this.registerDomEvent(root, "keydown", (e) => this.onKeyDown(e));
     this.registerDomEvent(root, "paste", (e) => this.onPaste(e));
+    this.registerDomEvent(this.deskEl, "wheel", (e) => this.onWheel(e), { passive: false });
 
     // Resizing in the next frame avoids a ResizeObserver feedback loop warning.
-    const ro = new ResizeObserver(() => requestAnimationFrame(() => this.fitToPane()));
+    const ro = new ResizeObserver(() => requestAnimationFrame(() => (this.fitToPane(), this.placePad())));
     ro.observe(this.deskEl);
     this.register(() => ro.disconnect());
     this.look = resolveLook("", "", this.host.settings);
@@ -370,7 +475,8 @@ export class DefterView extends TextFileView {
     this.toolButtons.shape = this.iconButton(tools, "minus", "Shapes: line, arrow, box (Alt+5)", (e) => this.shapeMenu(e));
     this.toolButtons.erase = this.iconButton(tools, "eraser", "Eraser (Alt+4)", () => this.setTool("erase"));
     this.toolButtons.select = this.iconButton(tools, "lasso-select", "Select and move (Alt+6)", () => this.setTool("select"));
-    this.iconButton(tools, "plus-square", "Insert: picture, sticky note, formula, template, bookmark", (e) => this.insertMenu(e));
+    this.toolButtons.pad = this.iconButton(tools, "signature", "Write pad: write with the mouse or touchpad (Alt+7)", () => this.setTool(this.tool === "pad" ? "write" : "pad"));
+    this.iconButton(tools, "plus-square", "Insert: picture, sticky note, tape, sticker, formula, PDF, template, bookmark", (e) => this.insertMenu(e));
 
     this.swatchesEl = this.dockEl.createDiv("defter-group defter-swatches");
     this.widthsEl = this.dockEl.createDiv("defter-group");
@@ -384,6 +490,39 @@ export class DefterView extends TextFileView {
     this.counterEl = nav.createSpan("defter-counter");
     this.iconButton(nav, "chevron-right", "Next page (Page Down)", () => this.goTo(this.pageIndex + 1));
     this.iconButton(nav, "plus", "New page after this one", () => this.addPage());
+    this.zoomEl = nav.createEl("button", { cls: "defter-zoom", attr: { "aria-label": "Zoom (Ctrl+wheel). Click to fit the page.", "data-tooltip-position": "top" } });
+    this.registerDomEvent(this.zoomEl, "click", (e) => this.zoomMenu(e));
+    this.iconButton(nav, "help-circle", "Keyboard shortcuts (F1)", () => new HelpModal(this.app).open());
+  }
+
+  private zoomMenu(e: MouseEvent) {
+    const menu = new Menu();
+    menu.addItem((i) => i.setTitle("Fit the page (Ctrl+0)").setIcon("maximize-2").onClick(() => this.setZoom(1)));
+    for (const z of ZOOMS) menu.addItem((i) => i.setTitle(Math.round(z * 100) + "%").setChecked(Math.abs(z - this.zoom) < 0.01).onClick(() => this.setZoom(z)));
+    menu.showAtMouseEvent(e);
+  }
+
+  private setZoom(z: number, at?: { x: number; y: number }) {
+    const desk = this.deskEl;
+    const before = this.holderEl.getBoundingClientRect();
+    const d = desk.getBoundingClientRect();
+    const ax = at?.x ?? d.left + d.width / 2;
+    const ay = at?.y ?? d.top + d.height / 2;
+    // Keep the point under the cursor in place.
+    const fx = (ax - before.left) / Math.max(1, before.width);
+    const fy = (ay - before.top) / Math.max(1, before.height);
+    this.zoom = Math.max(0.5, Math.min(3, z));
+    this.fitToPane();
+    const after = this.holderEl.getBoundingClientRect();
+    desk.scrollLeft += after.left + fx * after.width - ax;
+    desk.scrollTop += after.top + fy * after.height - ay;
+    this.pad?.draw();
+  }
+
+  private onWheel(e: WheelEvent) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    this.setZoom(this.zoom * Math.exp(-e.deltaY * 0.0022), { x: e.clientX, y: e.clientY });
   }
 
   private shapeMenu(e: MouseEvent) {
@@ -401,7 +540,8 @@ export class DefterView extends TextFileView {
       );
     }
     menu.addSeparator();
-    menu.addItem((i) => i.setTitle("Hold Shift for straight lines and squares").setDisabled(true));
+    menu.addItem((i) => i.setTitle("Shift: straight lines, squares, circles").setDisabled(true));
+    menu.addItem((i) => i.setTitle("Tip: with the pen, draw a shape and hold still").setDisabled(true));
     menu.showAtMouseEvent(e);
   }
 
@@ -409,7 +549,10 @@ export class DefterView extends TextFileView {
     const menu = new Menu();
     menu.addItem((i) => i.setTitle("Picture…").setIcon("image").setSection("insert").onClick(() => this.pickImage()));
     menu.addItem((i) => i.setTitle("Sticky note").setIcon("sticky-note").setSection("insert").onClick(() => this.addNote()));
+    menu.addItem((i) => i.setTitle("Hide tape (click to reveal)").setIcon("rectangle-horizontal").setSection("insert").onClick(() => this.addTape()));
+    menu.addItem((i) => i.setTitle("Stickers and stamps…").setIcon("sticker").setSection("insert").onClick(() => this.openStickers()));
     menu.addItem((i) => i.setTitle("Formula…").setIcon("sigma").setSection("insert").onClick(() => this.addFormula()));
+    menu.addItem((i) => i.setTitle("PDF pages…").setIcon("file-input").setSection("insert").onClick(() => this.importPdf()));
     menu.addItem((i) => i.setTitle("Tip: paste a screenshot with Ctrl+V").setDisabled(true).setSection("insert"));
     for (const t of [null, ...TEMPLATES]) {
       menu.addItem((i) =>
@@ -432,12 +575,18 @@ export class DefterView extends TextFileView {
     menu.showAtMouseEvent(e);
   }
 
+  /** Keeps the write pad just above the pencil case, however tall it wraps. */
+  private placePad() {
+    if (this.pad) this.pad.el.style.bottom = this.dockEl.offsetHeight + 26 + "px";
+  }
+
   private renderDockOptions() {
+    requestAnimationFrame(() => this.placePad());
     this.swatchesEl.empty();
     this.widthsEl.empty();
-    const colored = this.tool === "pen" || this.tool === "hl" || this.tool === "shape";
+    const colored = this.tool === "pen" || this.tool === "hl" || this.tool === "shape" || this.tool === "pad";
     this.swatchesEl.toggle(colored);
-    this.widthsEl.toggle(this.tool === "pen" || this.tool === "shape");
+    this.widthsEl.toggle(this.tool === "pen" || this.tool === "shape" || this.tool === "pad");
     setIcon(this.toolButtons.shape!, SHAPE_DEFS.find((s) => s.id === this.shapeKind)!.icon);
     if (!colored) return;
     const hl = this.tool === "hl";
@@ -454,6 +603,26 @@ export class DefterView extends TextFileView {
         this.renderDockOptions();
       };
     }
+    if (this.tool === "pen" || this.tool === "pad") {
+      const def = PEN_DEFS.find((p) => p.id === this.penKind)!;
+      const b = this.iconButton(this.widthsEl, def.icon, `Pen: ${def.label}`, (e) => {
+        const menu = new Menu();
+        for (const p of PEN_DEFS) {
+          menu.addItem((i) =>
+            i
+              .setTitle(p.label)
+              .setIcon(p.icon)
+              .setChecked(p.id === this.penKind)
+              .onClick(() => {
+                this.penKind = p.id;
+                this.renderDockOptions();
+              })
+          );
+        }
+        menu.showAtMouseEvent(e);
+      });
+      b.addClass("defter-penkind");
+    }
     PEN_WIDTHS.forEach((w, i) => {
       const b = this.widthsEl.createEl("button", { cls: "defter-width" });
       b.style.setProperty("--dot", w * 2 + "px");
@@ -468,12 +637,17 @@ export class DefterView extends TextFileView {
 
   private setTool(tool: Tool) {
     if (tool !== "select") this.clearSelection();
+    if (tool !== "pad" && this.pad) this.pad.close();
     this.tool = tool;
+    if (tool === "pad" && !this.pad) this.openPad();
     for (const id of Object.keys(this.toolButtons) as Tool[]) this.toolButtons[id]!.toggleClass("is-active", id === tool);
     this.sheetEl.dataset.tool = tool;
     this.renderDockOptions();
     if (tool === "write") this.textEl.focus({ preventScroll: true });
-    else this.textEl.blur();
+    else {
+      this.textEl.blur();
+      this.contentEl.focus({ preventScroll: true });
+    }
   }
 
   private sizeCanvases() {
@@ -485,14 +659,31 @@ export class DefterView extends TextFileView {
     }
   }
 
+  /** Two pages side by side? */
+  private wantSpread(): boolean {
+    const mode = this.host.settings.spread;
+    if (mode === "single") return false;
+    if (mode === "spread") return true;
+    const avail = this.deskEl.clientWidth - 48 - 40;
+    return avail >= this.dims.w * 2 * 0.62 + 24;
+  }
+
   private fitToPane() {
     const avail = this.deskEl.clientWidth - 48 - 40; // room for bookmark tabs
     if (avail <= 0) return;
+    const spread = this.wantSpread();
+    const per = spread ? (avail - 24) / 2 : avail;
     // Same zoom for every page size, so text looks the same and an A5 is a smaller page.
-    const s = Math.min(1.35, Math.max(0.45, avail / 820), avail / this.dims.w);
+    const fit = Math.min(1.35, Math.max(0.3, per / 820), per / this.dims.w);
+    const s = fit * this.zoom;
     this.sheetEl.style.transform = `scale(${s})`;
-    this.holderEl.style.width = this.dims.w * s + "px";
+    const w = this.dims.w * s;
+    this.holderEl.style.width = (spread ? w * 2 + 24 : w) + "px";
     this.holderEl.style.height = this.dims.h * s + "px";
+    this.holderEl.toggleClass("is-spread", spread);
+    this.deskEl.toggleClass("is-zoomed", this.zoom > 1.001);
+    if (this.zoomEl) this.zoomEl.setText(Math.round(this.zoom * 100) + "%");
+    this.layoutSpread(s);
   }
 
   // ---- Pages drawer (list + search) ----------------------------------------
@@ -503,6 +694,14 @@ export class DefterView extends TextFileView {
     const head = this.drawerEl.createDiv("defter-drawer-head");
     this.searchEl = head.createEl("input", { type: "search", cls: "defter-search", attr: { placeholder: "Search this notebook…" } });
     this.iconButton(head, "x", "Close", () => this.drawerEl.toggle(false));
+    this.drawerTabs = this.drawerEl.createDiv("defter-drawer-tabs");
+    for (const [id, label] of [["pages", "Pages"], ["grid", "Thumbnails"], ["todos", "To-dos"]] as const) {
+      const b = this.drawerTabs.createEl("button", { text: label, attr: { "data-mode": id } });
+      this.registerDomEvent(b, "click", () => {
+        this.drawerMode = id;
+        this.renderList();
+      });
+    }
     this.listEl = this.drawerEl.createDiv("defter-pages");
     this.registerDomEvent(this.searchEl, "input", () => this.renderList());
     this.registerDomEvent(this.searchEl, "keydown", (e) => {
@@ -529,6 +728,11 @@ export class DefterView extends TextFileView {
     if (!this.drawerEl.isShown()) return;
     this.listEl.empty();
     const q = this.searchEl.value.trim().toLocaleLowerCase("tr");
+    const mode = q ? "pages" : this.drawerMode;
+    for (const b of Array.from(this.drawerTabs.children) as HTMLElement[]) b.toggleClass("is-active", b.dataset.mode === mode);
+    this.listEl.toggleClass("is-grid", mode === "grid");
+    if (mode === "grid") return this.renderGrid();
+    if (mode === "todos") return this.renderTodos();
     let shown = 0;
     this.nb.pages.forEach((p, i) => {
       const notes = (p.obj ?? []).filter((o) => o.k === "note").map((o) => o.v).join("\n");
@@ -543,7 +747,7 @@ export class DefterView extends TextFileView {
       const body = row.createDiv("defter-page-body");
       const title = pageTitle(p.text) || (p.ink.length || p.obj?.length ? "Drawing" : "Empty page");
       body.createDiv({ cls: "defter-page-title", text: title });
-      if (p.date) body.createDiv({ cls: "defter-page-snippet", text: window.moment(p.date).format("ddd, D MMM YYYY") });
+      if (p.date) body.createDiv({ cls: "defter-page-snippet", text: fmtDate(p.date, "ddd, D MMM YYYY") });
       if (q && at !== -1) {
         const from = Math.max(0, at - 24);
         const snip = body.createDiv("defter-page-snippet");
@@ -573,10 +777,85 @@ export class DefterView extends TextFileView {
         };
         btn("arrow-up", "Move up", () => this.movePage(i, -1), i > 0);
         btn("arrow-down", "Move down", () => this.movePage(i, 1), i < this.nb.pages.length - 1);
+        btn("copy", "Duplicate page", () => this.duplicatePage(i), true);
         btn("trash-2", "Remove page (only when empty)", () => this.removePage(i), this.nb.pages.length > 1);
       }
     });
     if (!shown) this.listEl.createDiv({ cls: "defter-empty", text: q ? "No page contains this." : "No pages." });
+  }
+
+  /** Small pictures of every page, drawn when they scroll into view. */
+  private renderGrid() {
+    const scale = 0.17;
+    const io = new IntersectionObserver((entries) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        const tile = en.target as HTMLElement;
+        io.unobserve(tile);
+        const i = Number(tile.dataset.i);
+        const page = this.nb.pages[i];
+        if (!page) continue;
+        const sheet = renderStaticPage(this.app, tile.createDiv("defter-thumb-inner"), this.getDisplayText(), page, i + 1, this.look);
+        sheet.style.transform = `scale(${scale})`;
+      }
+    }, { root: this.listEl });
+    this.register(() => io.disconnect());
+    this.nb.pages.forEach((p, i) => {
+      const cell = this.listEl.createDiv("defter-thumb-cell");
+      cell.toggleClass("is-current", i === this.pageIndex);
+      const tile = cell.createDiv("defter-thumb");
+      tile.style.width = this.dims.w * scale + "px";
+      tile.style.height = this.dims.h * scale + "px";
+      tile.dataset.i = String(i);
+      if (p.mark) cell.style.setProperty("--mark", p.mark);
+      cell.toggleClass("has-mark", !!p.mark);
+      cell.createDiv({ cls: "defter-thumb-no", text: p.date ? `${i + 1} · ${fmtDate(p.date, "D MMM")}` : String(i + 1) });
+      this.registerDomEvent(cell, "click", () => {
+        this.goTo(i);
+        this.renderList();
+      });
+      io.observe(tile);
+    });
+    (this.listEl.querySelector(".is-current") as HTMLElement | null)?.scrollIntoView({ block: "center" });
+  }
+
+  /** Every "[ ] item" in the notebook, open ones first. */
+  private renderTodos() {
+    const items: { page: number; at: number; text: string; done: boolean }[] = [];
+    this.nb.pages.forEach((p, page) => {
+      let at = 0;
+      for (const line of p.text.split("\n")) {
+        const m = /^(\s*(?:[-*] )?)\[([ xX])\] (.*)$/.exec(line);
+        if (m) items.push({ page, at: at + m[1].length, text: m[3].replace(/\*\*|==|\[\[|\]\]/g, ""), done: m[2] !== " " });
+        at += line.length + 1;
+      }
+    });
+    if (!items.length) {
+      this.listEl.createDiv({ cls: "defter-empty", text: "No to-dos yet. Start a line with [ ] to make one." });
+      return;
+    }
+    items.sort((a, b) => Number(a.done) - Number(b.done) || a.page - b.page);
+    const open = items.filter((t) => !t.done).length;
+    this.listEl.createDiv({ cls: "defter-todo-sum", text: `${open} open · ${items.length - open} done` });
+    for (const t of items) {
+      const row = this.listEl.createDiv("defter-todo-row");
+      row.toggleClass("is-done", t.done);
+      const box = row.createEl("input", { type: "checkbox" });
+      box.checked = t.done;
+      this.registerDomEvent(box, "click", (e) => {
+        e.stopPropagation();
+        this.toggleCheckbox(t.page, t.at);
+        this.renderList();
+      });
+      row.createSpan({ cls: "defter-todo-text", text: t.text || "(empty)" });
+      row.createSpan({ cls: "defter-page-no", text: String(t.page + 1) });
+      this.registerDomEvent(row, "click", () => {
+        this.goTo(t.page);
+        this.setTool("write");
+        this.textEl.focus({ preventScroll: true });
+        this.textEl.setSelectionRange(t.at + 4, t.at + 4);
+      });
+    }
   }
 
   // ---- Pages --------------------------------------------------------------
@@ -588,12 +867,15 @@ export class DefterView extends TextFileView {
   private showPage(i: number, direction?: number) {
     this.finishStroke();
     this.clearSelection();
+    if (direction && i !== this.pageIndex) this.turnPage(direction);
     this.pageIndex = i;
     const page = this.page;
     applyBox(this.sheetEl, pageBox(page, this.dims));
     if (page.tpl) this.sheetEl.dataset.tpl = page.tpl;
     else delete this.sheetEl.dataset.tpl;
-    drawDecor(this.decorEl, page, this.dims, this.getDisplayText());
+    drawDecor(this.app, this.decorEl, page, this.dims, this.getDisplayText());
+    if (page.bg) this.sheetEl.dataset.bg = "1";
+    else delete this.sheetEl.dataset.bg;
     this.redrawObjects();
     this.renderTabs();
     const text = page.text;
@@ -609,11 +891,8 @@ export class DefterView extends TextFileView {
     this.updateCounter();
     this.pageNoEl.setText(String(i + 1));
     if (this.file) this.host.rememberPage(this.file.path, i);
-    if (direction) {
-      this.sheetEl.removeClass("flip-next", "flip-prev");
-      void this.sheetEl.offsetWidth;
-      this.sheetEl.addClass(direction > 0 ? "flip-next" : "flip-prev");
-    }
+    this.applyStudy();
+    this.renderPartner();
     // A larger font or a template can push text past the bottom: carry it on.
     this.fitText(false);
     this.renderList();
@@ -623,7 +902,7 @@ export class DefterView extends TextFileView {
     const label = `${this.pageIndex + 1} / ${this.nb.pages.length}`;
     this.counterEl.setText(label);
     const date = this.page.date;
-    this.chipEl?.setText(date ? `${window.moment(date).format("D MMM")} · ${label}` : `p. ${label}`);
+    this.chipEl?.setText(date ? `${fmtDate(date, "D MMM")} · ${label}` : `p. ${label}`);
   }
 
   onResize() {
@@ -661,9 +940,11 @@ export class DefterView extends TextFileView {
     this.showPage(this.pageIndex);
   }
 
-  private goTo(i: number) {
+  private goTo(i: number, turn = true) {
     if (i < 0 || i >= this.nb.pages.length || i === this.pageIndex) return;
-    this.showPage(i, i > this.pageIndex ? 1 : -1);
+    // Within an open spread the other page is already in view: no page turn.
+    const sameSpread = this.partnerEl && Math.floor(i / 2) === Math.floor(this.pageIndex / 2);
+    this.showPage(i, turn && !sameSpread ? (i > this.pageIndex ? 1 : -1) : undefined);
     if (this.tool === "write") {
       this.textEl.focus({ preventScroll: true });
       this.textEl.setSelectionRange(this.textEl.value.length, this.textEl.value.length);
@@ -697,6 +978,58 @@ export class DefterView extends TextFileView {
     this.redoStack = [];
     this.requestSave();
     this.showPage(Math.min(i <= this.pageIndex ? Math.max(0, this.pageIndex - 1) : this.pageIndex, this.nb.pages.length - 1), -1);
+  }
+
+  private duplicatePage(i: number) {
+    const copy = clone(this.nb.pages[i]);
+    delete copy.mark;
+    this.nb.pages.splice(i + 1, 0, copy);
+    this.undoStack = [];
+    this.redoStack = [];
+    this.requestSave();
+    this.goTo(i + 1);
+    new Notice(`Page ${i + 1} duplicated.`);
+  }
+
+  /** A page that only holds text carried over from the page before. */
+  private isPlainText(p: Page, date: string | undefined) {
+    return !p.ink.length && !p.obj?.length && !p.tpl && !p.mark && !p.bg && p.date === date;
+  }
+
+  /**
+   * After the text got smaller or the page bigger, pulls the text of the
+   * following text-only pages back and lets it flow over the pages again.
+   */
+  private reflow() {
+    const i = this.pageIndex;
+    const pages = this.nb.pages;
+    const date = this.page.date;
+    let text = this.page.text;
+    let n = 0;
+    while (pages[i + 1 + n] && this.isPlainText(pages[i + 1 + n], date)) {
+      const next = pages[i + 1 + n].text;
+      // A page split inside a paragraph ends with the space before the next word.
+      text = text.endsWith(" ") || !text ? text + next : text + "\n" + next;
+      n++;
+    }
+    if (!n) {
+      new Notice("The next page has drawings, a template or a bookmark, so nothing was moved.");
+      return;
+    }
+    const before = pages.length;
+    pages.splice(i + 1, n);
+    this.page.text = text;
+    this.undoStack = [];
+    this.redoStack = [];
+    this.showPage(i);
+    // Let the text flow over as many pages as it needs (never more than before).
+    for (let j = i + 1; j < pages.length && j <= i + n; j++) {
+      if (!this.isPlainText(pages[j], date)) break;
+      this.showPage(j);
+    }
+    this.showPage(i);
+    this.requestSave();
+    new Notice(`Done: ${before - pages.length > 0 ? before - pages.length + " page(s) fewer" : "pages refilled"}.`);
   }
 
   private movePage(i: number, dir: number) {
@@ -778,9 +1111,35 @@ export class DefterView extends TextFileView {
     this.syncMirror(true);
     this.fitText(true);
     this.requestSave();
+    this.renderCardsBtn();
+    if (this.studyMode) this.applyStudy();
+  }
+
+  private toggleCheckbox(page: number, at: number) {
+    const p = this.nb.pages[page];
+    const mark = p.text[at + 1] === " " ? "x" : " ";
+    p.text = p.text.slice(0, at + 1) + mark + p.text.slice(at + 2);
+    if (page === this.pageIndex) {
+      const ta = this.textEl;
+      const [a, b] = [ta.selectionStart, ta.selectionEnd];
+      ta.value = p.text;
+      this.syncMirror(false);
+      ta.setSelectionRange(a, b);
+    }
+    this.requestSave();
   }
 
   private onTextClick(e: MouseEvent) {
+    const pos = this.textEl.selectionStart;
+    if (this.textEl.selectionEnd === pos && !e.shiftKey) {
+      const box = checkboxAt(this.textEl.value, pos);
+      if (box !== null) {
+        this.toggleCheckbox(this.pageIndex, box);
+        this.textEl.setSelectionRange(box + 4, box + 4);
+        return;
+      }
+      if (this.studyMode && this.revealAt(pos, e)) return;
+    }
     if (!(e.ctrlKey || e.metaKey)) return;
     const target = linkAt(this.textEl.value, this.textEl.selectionStart);
     if (!target) return;
@@ -834,6 +1193,7 @@ export class DefterView extends TextFileView {
     const next = this.nb.pages[this.pageIndex + 1];
     next.text = next.text ? rest + "\n" + next.text : rest;
     this.updateCounter();
+    if (this.partnerIndex === this.pageIndex + 1) this.renderPartner();
     this.requestSave();
 
     if (follow && caret >= cut) {
@@ -895,6 +1255,12 @@ export class DefterView extends TextFileView {
   }
 
   private onPaste(e: ClipboardEvent) {
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (clipboard && text === CLIP_MARK + clipboard.id) {
+      e.preventDefault();
+      this.pasteClipboard();
+      return;
+    }
     const item = [...(e.clipboardData?.items ?? [])].find((i) => i.type.startsWith("image/"));
     const blob = item?.getAsFile();
     if (!blob) return;
@@ -907,6 +1273,55 @@ export class DefterView extends TextFileView {
     const o: PageObject = { k: "note", x: Math.round(cx - 100), y: Math.round(cy - 80), w: 200, h: 160, v: "", c: NOTE_COLORS[0] };
     this.addObject(o);
     this.editNote(o);
+  }
+
+  private addTape() {
+    const [cx, cy] = this.visibleCentre();
+    this.addObject({ k: "tape", x: Math.round(cx - 150), y: Math.round(cy - 20), w: 300, h: 40, v: "", c: TAPE_COLORS[0] });
+  }
+
+  /** Tape is clicked open and shut in every tool but select. */
+  private onObjectClick(e: MouseEvent) {
+    const el = (e.target as HTMLElement).closest(".defter-obj-tape") as HTMLElement | null;
+    if (!el || this.tool === "select") return;
+    el.toggleClass("is-open", !el.hasClass("is-open"));
+  }
+
+  private openStickers() {
+    new StickerModal(
+      this.app,
+      this.host.settings.stickers,
+      this.look.tone,
+      (p) => {
+        const [cx, cy] = this.visibleCentre();
+        if ("stamp" in p) {
+          const sym = [...p.stamp].length <= 2;
+          const h = sym ? 64 : 52;
+          const w = sym ? 64 : Math.max(90, Math.round(p.stamp.length * h * 0.42 * 0.68 + 36));
+          this.addObject({ k: "stamp", x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h, v: p.stamp, c: p.color });
+          return;
+        }
+        this.pasteItems(clone(p.sticker.ink), clone(p.sticker.obj), cx - p.sticker.w / 2, cy - p.sticker.h / 2, true);
+      },
+      (st) => {
+        this.host.settings.stickers = this.host.settings.stickers.filter((x) => x.id !== st.id);
+        void this.host.saveSettings();
+      }
+    ).open();
+  }
+
+  private saveSticker() {
+    const b = this.selectionBounds();
+    if (!b) return;
+    const ink = clone([...this.sel.strokes]);
+    const obj = clone([...this.sel.objs]);
+    const dx = -b.x1, dy = -b.y1;
+    for (const st of ink) for (let i = 0; i < st.p.length; i += 2) (st.p[i] += dx), (st.p[i + 1] += dy);
+    for (const o of obj) (o.x += dx), (o.y += dy);
+    const sticker: Sticker = { id: Date.now().toString(36), ink, obj, w: Math.round(b.x2 - b.x1), h: Math.round(b.y2 - b.y1) };
+    this.host.settings.stickers.push(sticker);
+    void this.host.saveSettings();
+    new Notice("Saved as a sticker. Find it under Insert → Stickers, in every notebook.");
   }
 
   private addFormula() {
@@ -947,6 +1362,20 @@ export class DefterView extends TextFileView {
       for (const c of NOTE_COLORS) {
         menu.addItem((i) => {
           i.setTitle("Note colour").setIcon("square").setSection("colour").onClick(() => {
+            this.snapshot();
+            o.c = c;
+            this.requestSave();
+            this.showPage(this.pageIndex);
+          });
+          const icon = (i as unknown as { iconEl?: HTMLElement }).iconEl;
+          if (icon) icon.style.color = c;
+        });
+      }
+    }
+    if (o.k === "tape" || o.k === "stamp") {
+      for (const c of o.k === "tape" ? TAPE_COLORS : STAMP_COLORS) {
+        menu.addItem((i) => {
+          i.setTitle(o.k === "tape" ? "Tape colour" : "Stamp colour").setIcon("square").setSection("colour").onClick(() => {
             this.snapshot();
             o.c = c;
             this.requestSave();
@@ -1025,7 +1454,107 @@ export class DefterView extends TextFileView {
     box.style.width = b.x2 - b.x1 + "px";
     box.style.height = b.y2 - b.y1 + "px";
     if (this.sel.objs.size === 1 && !this.sel.strokes.size) box.createDiv("defter-sel-handle");
+    if (!this.drag) this.selectionBar(b);
     this.selEl.toggle(true);
+  }
+
+  /** Floating bar over a selection: colour, copy, duplicate, sticker, delete. */
+  private selectionBar(b: { x1: number; y1: number; x2: number; y2: number }) {
+    const bar = this.selEl.createDiv("defter-sel-bar");
+    bar.style.left = Math.max(4, b.x1) + "px";
+    bar.style.top = (b.y1 > 60 ? b.y1 - 52 : b.y2 + 10) + "px";
+    const stop = (el: HTMLElement) => el.addEventListener("pointerdown", (e) => e.stopPropagation());
+    stop(bar);
+    if (this.sel.strokes.size) {
+      for (const ink of INKS) {
+        const sw = bar.createEl("button", { cls: "defter-swatch", attr: { "aria-label": `Recolour: ${ink.label}` } });
+        sw.style.setProperty("--swatch", inkFor(ink.id, this.look.tone));
+        sw.onclick = () => this.recolor(ink.id);
+      }
+    }
+    const btn = (icon: string, label: string, fn: () => void) => {
+      const el = bar.createEl("button", { cls: "defter-btn clickable-icon", attr: { "aria-label": label } });
+      setIcon(el, icon);
+      el.onclick = fn;
+    };
+    btn("copy", "Copy (Ctrl+C)", () => this.copySelection());
+    btn("copy-plus", "Duplicate (Ctrl+D)", () => this.duplicateSelection());
+    btn("sticker", "Save as sticker", () => this.saveSticker());
+    btn("trash-2", "Delete", () => this.deleteSelection());
+  }
+
+  private recolor(color: string) {
+    this.snapshot();
+    for (const st of this.sel.strokes) if (st.t === "pen") st.c = color;
+    this.requestSave();
+    this.redrawInk();
+    this.renderSelection();
+  }
+
+  private copySelection() {
+    if (!this.sel.strokes.size && !this.sel.objs.size) return;
+    const id = Date.now().toString(36);
+    clipboard = { id, ink: clone([...this.sel.strokes]), obj: clone([...this.sel.objs]) };
+    // The system clipboard gets a marker, so Ctrl+V knows our drawing is the newest copy.
+    void navigator.clipboard.writeText(CLIP_MARK + id).catch(() => undefined);
+    new Notice("Copied. Paste with Ctrl+V on any page.");
+  }
+
+  private duplicateSelection() {
+    if (!this.sel.strokes.size && !this.sel.objs.size) return;
+    this.pasteItems(clone([...this.sel.strokes]), clone([...this.sel.objs]), 24, 24, false);
+  }
+
+  /** Adds strokes and objects, moved by dx,dy (or placed with their corner at dx,dy). */
+  private pasteItems(ink: Stroke[], obj: PageObject[], dx: number, dy: number, absolute: boolean) {
+    if (absolute) {
+      const pts: number[] = [];
+      for (const st of ink) pts.push(...strokePoints(st));
+      for (const o of obj) pts.push(o.x, o.y, o.x + o.w, o.y + o.h);
+      const bb = pts.length ? bounds(pts) : { x1: 0, y1: 0 };
+      dx -= bb.x1;
+      dy -= bb.y1;
+    }
+    this.snapshot();
+    for (const st of ink) for (let i = 0; i < st.p.length; i += 2) (st.p[i] += dx), (st.p[i + 1] += dy);
+    for (const o of obj) (o.x = Math.round(o.x + dx)), (o.y = Math.round(o.y + dy));
+    this.page.ink.push(...ink);
+    if (obj.length) (this.page.obj ??= []).push(...obj);
+    this.requestSave();
+    this.redrawInk();
+    this.redrawObjects();
+    this.setTool("select");
+    this.sel = { strokes: new Set(ink), objs: new Set(obj) };
+    this.renderSelection();
+  }
+
+  /**
+   * Ctrl+V outside the text: the newest copy wins. A picture copied after our
+   * drawing is pasted as a picture, otherwise the copied drawing.
+   */
+  private async pasteFromKeyboard() {
+    let image: Blob | null = null;
+    let text = "";
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        const type = item.types.find((t) => t.startsWith("image/"));
+        if (type && !image) image = await item.getType(type);
+        if (item.types.includes("text/plain")) text = await (await item.getType("text/plain")).text();
+      }
+    } catch {
+      /* clipboard not readable: fall back to our own copy */
+    }
+    if (clipboard && (text === CLIP_MARK + clipboard.id || !image)) this.pasteClipboard();
+    else if (image) await this.placeImage(image);
+  }
+
+  private pasteClipboard() {
+    if (!clipboard) return;
+    const ink = clone(clipboard.ink);
+    const obj = clone(clipboard.obj);
+    // Same page: offset so the copy is visible; another page: same place.
+    const here = this.page.ink.some((st) => ink.some((c) => JSON.stringify(c.p) === JSON.stringify(st.p)));
+    this.pasteItems(ink, obj, here ? 24 : 0, here ? 24 : 0, false);
   }
 
   private deleteSelection() {
@@ -1098,6 +1627,11 @@ export class DefterView extends TextFileView {
 
   private onPointerDown(e: PointerEvent) {
     if (this.tool === "write") return;
+    if (this.tool === "pad") {
+      const [x, y] = this.point(e);
+      if (e.button === 0) this.pad?.setTarget(x, y);
+      return;
+    }
     if (e.button === 2) {
       const [x, y] = this.point(e);
       const hit = hitObject(this.page.obj ?? [], x, y);
@@ -1106,6 +1640,7 @@ export class DefterView extends TextFileView {
     }
     if (e.button !== 0) return;
     e.preventDefault();
+    this.contentEl.focus({ preventScroll: true });
     this.drawerEl.toggle(false);
     this.inkCanvas.setPointerCapture(e.pointerId);
     const [x, y] = this.point(e);
@@ -1136,13 +1671,41 @@ export class DefterView extends TextFileView {
       this.eraseAlong(x, y);
       return;
     }
-    if (this.tool === "shape") {
-      this.stroke = { t: "pen", s: this.shapeKind, c: this.penColor, w: this.penWidth, p: [x, y, x, y] };
+    this.snapped = false;
+    if (this.tool === "shape" || (this.tool === "pen" && e.shiftKey)) {
+      this.stroke = this.newPenStroke(x, y);
+      this.stroke.s = this.tool === "shape" ? this.shapeKind : "line";
+      this.stroke.p = [x, y, x, y];
+      if (this.stroke.y === "fountain") delete this.stroke.y;
+    } else if (this.tool === "hl") {
+      this.stroke = { t: "hl", c: this.hlColor, w: HL_WIDTH, p: [x, y] };
     } else {
-      const hl = this.tool === "hl";
-      this.stroke = { t: hl ? "hl" : "pen", c: hl ? this.hlColor : this.penColor, w: hl ? HL_WIDTH : this.penWidth, p: [x, y] };
+      this.stroke = this.newPenStroke(x, y);
+      this.armHold();
     }
     this.queueDraw();
+  }
+
+  private newPenStroke(x: number, y: number): Stroke {
+    const st: Stroke = { t: "pen", c: this.penColor, w: this.penWidth, p: [x, y] };
+    if (this.penKind !== "ball") st.y = this.penKind;
+    return st;
+  }
+
+  /** Draw and hold still: the freehand line becomes a clean shape. */
+  private armHold() {
+    window.clearTimeout(this.holdTimer);
+    this.holdTimer = window.setTimeout(() => {
+      const st = this.stroke;
+      if (!st || st.s || st.t !== "pen" || this.snapped) return;
+      const shape = recognizeShape(st.p);
+      if (!shape) return;
+      st.s = shape.s;
+      st.p = shape.p;
+      if (st.y === "fountain") delete st.y;
+      this.snapped = true;
+      this.queueDraw();
+    }, HOLD_MS);
   }
 
   private onPointerMove(e: PointerEvent) {
@@ -1155,7 +1718,7 @@ export class DefterView extends TextFileView {
       this.eraseAlong(x, y);
       return;
     }
-    if (!this.stroke) return;
+    if (!this.stroke || this.snapped) return;
     const p = this.stroke.p;
     if (this.stroke.s) {
       let [x, y] = this.point(e);
@@ -1170,6 +1733,8 @@ export class DefterView extends TextFileView {
         const dy = y - p[p.length - 1];
         if (dx * dx + dy * dy >= 2.25) p.push(x, y);
       }
+      // Still moving: restart the hold timer.
+      if (this.stroke.t === "pen") this.armHold();
     }
     this.queueDraw();
   }
@@ -1284,10 +1849,12 @@ export class DefterView extends TextFileView {
   }
 
   private finishStroke() {
+    window.clearTimeout(this.holdTimer);
     if (!this.stroke) return;
     const s = this.stroke;
     this.stroke = null;
-    if (s.s && Math.hypot(s.p[2] - s.p[0], s.p[3] - s.p[1]) < 3) {
+    if (!s.s && s.t === "pen") s.p = smoothPoints(s.p);
+    if (s.s && s.s !== "poly" && Math.hypot(s.p[2] - s.p[0], s.p[3] - s.p[1]) < 3) {
       this.undoStack.pop();
       this.redrawLayer(s.t);
       return;
@@ -1328,10 +1895,67 @@ export class DefterView extends TextFileView {
 
   private onKeyDown(e: KeyboardEvent) {
     if (e.target === this.searchEl) return;
-    if (e.altKey && ["1", "2", "3", "4", "5", "6"].includes(e.key)) {
+    if ((e.target as HTMLElement).hasClass?.("defter-note-edit")) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (e.altKey && ["1", "2", "3", "4", "5", "6", "7"].includes(e.key)) {
       e.preventDefault();
-      this.setTool((["write", "pen", "hl", "erase", "shape", "select"] as Tool[])[Number(e.key) - 1]);
+      this.setTool((["write", "pen", "hl", "erase", "shape", "select", "pad"] as Tool[])[Number(e.key) - 1]);
       return;
+    }
+    if (e.altKey && !mod && e.code === "KeyF") {
+      e.preventDefault();
+      this.toggleFocus();
+      return;
+    }
+    if (e.altKey && !mod && e.code === "KeyS") {
+      e.preventDefault();
+      this.toggleStudy();
+      return;
+    }
+    if (e.key === "F1") {
+      e.preventDefault();
+      new HelpModal(this.app).open();
+      return;
+    }
+    if (mod && (e.key === "=" || e.key === "+")) {
+      e.preventDefault();
+      this.setZoom(this.zoom * 1.2);
+      return;
+    }
+    if (mod && e.key === "-") {
+      e.preventDefault();
+      this.setZoom(this.zoom / 1.2);
+      return;
+    }
+    if (mod && e.key === "0") {
+      e.preventDefault();
+      this.setZoom(1);
+      return;
+    }
+    if (this.tool !== "write" && mod && e.key.toLowerCase() === "v") {
+      e.preventDefault();
+      void this.pasteFromKeyboard();
+      return;
+    }
+    if (this.tool === "select" && mod) {
+      const k = e.key.toLowerCase();
+      if (k === "c") {
+        e.preventDefault();
+        this.copySelection();
+        return;
+      }
+      if (k === "d") {
+        e.preventDefault();
+        this.duplicateSelection();
+        return;
+      }
+
+      if (k === "a") {
+        e.preventDefault();
+        this.sel = { strokes: new Set(this.page.ink), objs: new Set(this.page.obj ?? []) };
+        this.renderSelection();
+        return;
+      }
     }
     if (e.key === "PageDown" || e.key === "PageUp") {
       e.preventDefault();
@@ -1349,7 +1973,8 @@ export class DefterView extends TextFileView {
       return;
     }
     if (e.key === "Escape") {
-      if (this.drawerEl.isShown()) this.drawerEl.toggle(false);
+      if (this.focusMode) this.toggleFocus();
+      else if (this.drawerEl.isShown()) this.drawerEl.toggle(false);
       else if (this.sel.strokes.size || this.sel.objs.size) this.clearSelection();
       else if (this.tool !== "write") this.setTool("write");
       return;
@@ -1365,5 +1990,311 @@ export class DefterView extends TextFileView {
         this.redo();
       }
     }
+  }
+
+  /** Opens a page from outside (flashcard source link). */
+  jumpTo(page: number) {
+    if (page >= 0 && page < this.nb.pages.length) this.goTo(page);
+  }
+
+  // ---- Study tools ------------------------------------------------------------
+
+  private renderCardsBtn() {
+    const n = parseCards(this.nb.pages).length;
+    this.cardsBtn?.toggleClass("has-count", n > 0);
+    this.cardsBtn?.setAttr("data-count", n ? String(n) : "");
+  }
+
+  private studyCards() {
+    if (!this.file) return;
+    const path = this.file.path;
+    const cards = parseCards(this.nb.pages);
+    if (!cards.length) {
+      new Notice("No flashcards yet. Write a line like “mol :: 6.02 × 10²³ particles”, then press this again.", 8000);
+      return;
+    }
+    const today = todayStr();
+    const due = cards.filter((c) => isDue(this.host.cardState(path, c.front), today));
+    if (!due.length) {
+      new Notice(`All ${cards.length} cards are learned for today. Come back tomorrow.`);
+      return;
+    }
+    new StudyModal(this.app, due.map((card) => ({ card, path, notebook: this.getDisplayText() })), this.host).open();
+  }
+
+  private toggleStudy() {
+    this.studyMode = !this.studyMode;
+    this.revealed.clear();
+    this.studyBtn?.toggleClass("is-active", this.studyMode);
+    this.sheetEl.toggleClass("is-study", this.studyMode);
+    this.applyStudy();
+    new Notice(this.studyMode ? "Study mode: highlighted text and card answers are hidden. Click to reveal." : "Study mode off.");
+  }
+
+  /** Character ranges hidden in study mode: ==marks==, card answers and text under highlighter. */
+  private hiddenRuns(): { key: string; from: number; to: number }[] {
+    const text = this.textEl.value;
+    const runs: { key: string; from: number; to: number }[] = [];
+    let at = 0;
+    for (const line of text.split("\n")) {
+      for (const m of line.matchAll(/==(?=\S)(.+?)==/g)) runs.push({ key: "t" + (at + m.index!), from: at + m.index! + 2, to: at + m.index! + m[0].length - 2 });
+      const c = line.indexOf(" :: ");
+      if (c > 0) runs.push({ key: "t" + (at + c), from: at + c + 4, to: at + line.length });
+      at += line.length + 1;
+    }
+    // Letters under a highlighter stroke.
+    const hl = this.page.ink.filter((st) => st.t === "hl");
+    if (hl.length) {
+      const sheet = this.sheetEl.getBoundingClientRect();
+      const scale = sheet.width / this.dims.w || 1;
+      hl.forEach((st, k) => {
+        const pts = strokePoints(st);
+        const r = st.w / 2 + 2;
+        let from = -1, to = -1;
+        this.spans.forEach((sp, i) => {
+          if (!sp.textContent?.trim()) return;
+          const b = sp.getBoundingClientRect();
+          const cx = (b.left + b.width / 2 - sheet.left) / scale;
+          const cy = (b.top + b.height * 0.55 - sheet.top) / scale;
+          for (let j = 0; j < pts.length; j += 2) {
+            if (Math.abs(pts[j] - cx) <= r && Math.abs(pts[j + 1] - cy) <= r) {
+              if (from === -1) from = i;
+              to = i + 1;
+              return;
+            }
+          }
+        });
+        if (from !== -1) runs.push({ key: "s" + k, from, to });
+      });
+    }
+    return runs;
+  }
+
+  private applyStudy() {
+    for (const sp of this.spans) sp.removeClass("is-hidden");
+    if (!this.studyMode) {
+      this.redrawInk();
+      return;
+    }
+    for (const r of this.hiddenRuns()) {
+      if (this.revealed.has(r.key)) continue;
+      for (let i = r.from; i < r.to; i++) this.spans[i]?.addClass("is-hidden");
+    }
+    this.redrawInk();
+  }
+
+  private revealAt(pos: number, e: MouseEvent): boolean {
+    for (const r of this.hiddenRuns()) {
+      if (pos < r.from - 1 || pos > r.to + 1) continue;
+      if (this.revealed.has(r.key)) this.revealed.delete(r.key);
+      else this.revealed.add(r.key);
+      this.applyStudy();
+      e.preventDefault();
+      return true;
+    }
+    return false;
+  }
+
+  // ---- View modes -------------------------------------------------------------
+
+  private toggleFocus() {
+    this.focusMode = !this.focusMode;
+    this.containerEl.toggleClass("defter-focus", this.focusMode);
+    if (this.focusMode) new Notice("Focus mode. Esc or Alt+F to leave.");
+    requestAnimationFrame(() => this.fitToPane());
+  }
+
+  // ---- PDF pages and page images ----------------------------------------------------
+
+  private importPdf() {
+    if (!this.file) return;
+    importPdf(this.app, this.file, (imported) => {
+      if (!imported.length) return;
+      const empty = this.nb.pages.length === 1 && !this.page.text.trim() && !this.page.ink.length && !this.page.obj?.length && !this.page.bg;
+      const pages: Page[] = imported.map((im) => ({ text: "", ink: [], bg: im.path }));
+      if (empty) this.nb.pages.splice(0, 1, ...pages);
+      else this.nb.pages.splice(this.pageIndex + 1, 0, ...pages);
+      this.undoStack = [];
+      this.redoStack = [];
+      this.requestSave();
+      const first = empty ? 0 : this.pageIndex + 1;
+      if (empty) this.showPage(0);
+      else this.goTo(first);
+      new Notice(`${imported.length} PDF page(s) added. Write or draw on them like any page.`);
+    });
+  }
+
+  /** Copies the page to the clipboard or saves it next to the notebook as a PNG. */
+  private async pageImage(mode: "copy" | "save") {
+    const remote = getRemote();
+    if (!remote) {
+      new Notice("Page images need the Obsidian desktop app.");
+      return;
+    }
+    this.finishStroke();
+    const cover = document.body.createDiv("defter-capture");
+    try {
+      const sheet = renderStaticPage(this.app, cover, this.getDisplayText(), this.page, this.pageIndex + 1, this.look);
+      const s = Math.min((window.innerWidth - 40) / this.dims.w, (window.innerHeight - 40) / this.dims.h);
+      sheet.style.transform = `scale(${s})`;
+      await document.fonts.ready;
+      await Promise.all([...cover.querySelectorAll("img")].map((img) => (img.complete ? null : new Promise((r) => ((img.onload = r), (img.onerror = r))))));
+      await new Promise((r) => setTimeout(r, 120));
+      const r = sheet.getBoundingClientRect();
+      const img = await remote.getCurrentWebContents().capturePage({ x: Math.round(r.left), y: Math.round(r.top), width: Math.floor(r.width), height: Math.floor(r.height) });
+      const png = img.toPNG();
+      if (mode === "copy") {
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": new Blob([new Uint8Array(png)], { type: "image/png" }) })]);
+        } catch {
+          // The web clipboard needs a focused window; Electron's own does not.
+          this.electronCopy(png);
+        }
+        new Notice("Page copied as an image.");
+      } else if (this.file) {
+        const name = `${this.getDisplayText()} p${this.pageIndex + 1}.png`;
+        const path = await this.app.fileManager.getAvailablePathForAttachment(name, this.file.path);
+        await this.app.vault.createBinary(normalizePath(path), new Uint8Array(png).buffer);
+        new Notice(`Saved ${path}`);
+      }
+    } catch (e) {
+      new Notice("Could not make the image: " + (e as Error).message);
+    } finally {
+      cover.remove();
+    }
+  }
+
+  private electronCopy(png: Uint8Array) {
+    const electron = (window as unknown as { require: (m: string) => ElectronClip }).require("electron");
+    const buf = (window as unknown as { require: (m: string) => { Buffer: { from(a: Uint8Array): unknown } } }).require("buffer").Buffer.from(png);
+    electron.clipboard.writeImage(electron.nativeImage.createFromBuffer(buf));
+  }
+
+  // ---- Write pad ---------------------------------------------------------------
+
+  private openPad() {
+    this.drawerEl.toggle(false);
+    this.pad = new WritePad(this.contentEl, {
+      sheetEl: this.sheetEl,
+      dims: () => this.dims,
+      page: () => this.page,
+      tone: () => this.look.tone,
+      startAt: () => {
+        const box = pageBox(this.page, this.dims);
+        // First line under the typed text and under any ink.
+        const textLines = Math.ceil((this.mirrorEl.scrollHeight || 0) / LINE);
+        let inkBottom = 0;
+        for (const st of this.page.ink) for (let i = 1; i < st.p.length; i += 2) inkBottom = Math.max(inkBottom, st.p[i]);
+        const inkRow = inkBottom ? Math.ceil((inkBottom - TEXT_TOP) / LINE) : 0;
+        const row = Math.min(Math.max(textLines, inkRow, 0), box.lines - 1);
+        return { left: box.left, row };
+      },
+      beginStroke: (x, y) => {
+        this.snapshot();
+        this.stroke = this.newPenStroke(x, y);
+        this.queueDraw();
+      },
+      extendStroke: (x, y) => {
+        const st = this.stroke;
+        if (!st) return;
+        const p = st.p;
+        const dx = x - p[p.length - 2];
+        const dy = y - p[p.length - 1];
+        if (dx * dx + dy * dy >= 0.36) p.push(x, y);
+        this.queueDraw();
+      },
+      endStroke: () => {
+        const st = this.stroke;
+        if (!st) return null;
+        if (st.p.length === 2) st.p.push(st.p[0] + 0.5, st.p[1]);
+        const right = Math.max(...st.p.filter((_, i) => i % 2 === 0));
+        this.finishStroke();
+        return right;
+      },
+      liveStroke: () => this.stroke,
+      undo: () => this.undo(),
+      speed: () => this.host.settings.padSpeed,
+      closed: () => {
+        this.pad = null;
+        if (this.tool === "pad") this.setTool("write");
+      },
+    });
+    this.placePad();
+  }
+
+  // ---- Spread and page turn ------------------------------------------------------
+
+  /** The facing page of a two-page spread, drawn read-only; click it to write there. */
+  private renderPartner() {
+    const spread = this.holderEl.hasClass("is-spread");
+    const partner = this.pageIndex % 2 === 0 ? this.pageIndex + 1 : this.pageIndex - 1;
+    if (!spread) {
+      this.partnerEl?.remove();
+      this.partnerEl = null;
+      this.partnerIndex = -1;
+      this.sheetEl.removeClass("is-right");
+      return;
+    }
+    this.partnerEl?.remove();
+    this.partnerIndex = partner;
+    const wrap = this.holderEl.createDiv("defter-partner");
+    this.partnerEl = wrap;
+    const page = this.nb.pages[partner];
+    if (page) {
+      renderStaticPage(this.app, wrap, this.getDisplayText(), page, partner + 1, this.look);
+      wrap.setAttr("aria-label", `Page ${partner + 1}: click to write here`);
+      wrap.onclick = () => this.goTo(partner, false);
+    } else {
+      const blank = wrap.createDiv("defter-sheet defter-static-sheet defter-blank-page");
+      applyDims(blank, this.dims);
+      blank.dataset.paper = this.look.paper;
+      blank.dataset.tone = this.look.tone;
+      blank.createDiv({ cls: "defter-blank-hint", text: "+ New page" });
+      wrap.onclick = () => this.addPage();
+    }
+    this.layoutSpread();
+  }
+
+  private layoutSpread(scale?: number) {
+    const spread = this.holderEl.hasClass("is-spread");
+    if (!spread) {
+      this.sheetEl.style.left = "0px";
+      if (this.partnerEl) this.renderPartner();
+      return;
+    }
+    if (!this.partnerEl) {
+      this.renderPartner();
+      return;
+    }
+    const s = scale ?? (this.sheetEl.getBoundingClientRect().width / this.dims.w || 1);
+    const w = this.dims.w * s;
+    const right = this.pageIndex % 2 === 1;
+    this.sheetEl.toggleClass("is-right", right);
+    this.sheetEl.style.left = (right ? w + 24 : 0) + "px";
+    const inner = this.partnerEl.firstElementChild as HTMLElement | null;
+    this.partnerEl.style.left = (right ? 0 : w + 24) + "px";
+    this.partnerEl.style.width = w + "px";
+    this.partnerEl.style.height = this.dims.h * s + "px";
+    this.partnerEl.toggleClass("is-left", right);
+    if (inner) inner.style.transform = `scale(${s})`;
+  }
+
+  /** A copy of the old page swings over its spine edge while the new one shows. */
+  private turnPage(direction: number) {
+    if (!this.host.settings.pageTurn || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (!this.sheetEl.isShown() || !this.nb.pages[this.pageIndex]) return;
+    this.turnEl?.remove();
+    const r = this.sheetEl.getBoundingClientRect();
+    const h = this.holderEl.getBoundingClientRect();
+    const wrap = this.holderEl.createDiv("defter-turn " + (direction > 0 ? "is-next" : "is-prev"));
+    wrap.style.left = r.left - h.left + "px";
+    wrap.style.top = r.top - h.top + "px";
+    wrap.style.width = r.width + "px";
+    wrap.style.height = r.height + "px";
+    const sheet = renderStaticPage(this.app, wrap, this.getDisplayText(), this.page, this.pageIndex + 1, this.look);
+    sheet.style.transform = `scale(${r.width / this.dims.w})`;
+    this.turnEl = wrap;
+    wrap.addEventListener("animationend", () => wrap.remove(), { once: true });
+    setTimeout(() => wrap.remove(), 900);
   }
 }

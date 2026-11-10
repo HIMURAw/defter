@@ -1,5 +1,17 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
-import { getProp } from "./format";
+import { getProp, type PageObject, type Stroke } from "./format";
+import type { CardState } from "./cards";
+
+/** A drawing saved for reuse, stored with its top-left corner at 0,0. */
+export interface Sticker {
+  id: string;
+  ink: Stroke[];
+  obj: PageObject[];
+  w: number;
+  h: number;
+}
+
+export type SpreadMode = "auto" | "single" | "spread";
 
 export type Paper = "ruled" | "grid" | "dots" | "blank";
 export type Tone = "cream" | "white" | "dark";
@@ -89,6 +101,17 @@ export interface DefterSettings {
   caseOrder: string[];
   /** Book order per bookcase folder: file names. */
   bookOrder: Record<string, string[]>;
+  /** Flashcard progress: notebook path → card front → state. */
+  cards: Record<string, Record<string, CardState>>;
+  /** Study minutes: notebook path → day → minutes. */
+  study: Record<string, Record<string, number>>;
+  stickers: Sticker[];
+  /** Write pad: touchpad speed multiplier. */
+  padSpeed: number;
+  /** Language of written dates: "" follows Obsidian. */
+  dateLocale: string;
+  pageTurn: boolean;
+  spread: SpreadMode;
 }
 
 export const DEFAULT_SETTINGS: DefterSettings = {
@@ -103,7 +126,48 @@ export const DEFAULT_SETTINGS: DefterSettings = {
   bookcases: [],
   caseOrder: [],
   bookOrder: {},
+  cards: {},
+  study: {},
+  stickers: [],
+  padSpeed: 1,
+  dateLocale: "",
+  pageTurn: true,
+  spread: "auto",
 };
+
+/** Settings fields that hold objects and must not be shared with the defaults. */
+export function freshSettings(saved: Partial<DefterSettings> | null): DefterSettings {
+  const s = { ...DEFAULT_SETTINGS, ...(saved ?? {}) } as DefterSettings;
+  s.lastPage = { ...(s.lastPage ?? {}) };
+  s.bookcases = [...(s.bookcases ?? [])];
+  s.caseOrder = [...(s.caseOrder ?? [])];
+  s.bookOrder = { ...(s.bookOrder ?? {}) };
+  s.cards = { ...(s.cards ?? {}) };
+  s.study = { ...(s.study ?? {}) };
+  s.stickers = [...(s.stickers ?? [])];
+  return s;
+}
+
+let dateLocale = "";
+export function setDateLocale(l: string) {
+  dateLocale = l;
+}
+/** Formats a YYYY-MM-DD day in the chosen date language. */
+export function fmtDate(day: string, format: string): string {
+  const m = window.moment(day, "YYYY-MM-DD");
+  if (!m.isValid()) return day;
+  if (dateLocale) m.locale(dateLocale);
+  return m.format(format);
+}
+
+export const DATE_LOCALES: [string, string][] = [
+  ["", "Same as Obsidian"],
+  ["en", "English"],
+  ["tr", "Türkçe"],
+  ["de", "Deutsch"],
+  ["fr", "Français"],
+  ["es", "Español"],
+];
 
 export interface NotebookLook {
   page: PageSize;
@@ -194,5 +258,34 @@ export class DefterSettingTab extends PluginSettingTab {
         d.addOption("off", "Off").addOption("fast", "Fast").addOption("normal", "Normal").addOption("slow", "Slow");
         d.setValue(s.anim).onChange(async (v) => ((s.anim = v as AnimSpeed), await save()));
       });
+
+    new Setting(containerEl).setName("Pages").setHeading();
+    new Setting(containerEl)
+      .setName("Two-page spread")
+      .setDesc("Show two pages side by side like an open book. Auto does it when the pane is wide enough.")
+      .addDropdown((d) => {
+        d.addOption("auto", "Auto").addOption("single", "Always one page").addOption("spread", "Always two pages");
+        d.setValue(s.spread).onChange(async (v) => ((s.spread = v as SpreadMode), await save()));
+      });
+    new Setting(containerEl)
+      .setName("Page turn animation")
+      .addToggle((t) => t.setValue(s.pageTurn).onChange(async (v) => ((s.pageTurn = v), await save())));
+    new Setting(containerEl)
+      .setName("Date language")
+      .setDesc("Language of the dates written on journal pages.")
+      .addDropdown((d) => {
+        for (const [id, label] of DATE_LOCALES) d.addOption(id, label);
+        d.setValue(s.dateLocale).onChange(async (v) => ((s.dateLocale = v), setDateLocale(v), await save()));
+      });
+    new Setting(containerEl)
+      .setName("Touchpad speed")
+      .setDesc("How far the pen moves for a finger movement in the write pad's touchpad mode.")
+      .addSlider((sl) =>
+        sl
+          .setLimits(0.4, 2.5, 0.1)
+          .setValue(s.padSpeed)
+          .setDynamicTooltip()
+          .onChange(async (v) => ((s.padSpeed = v), await this.host.saveSettings()))
+      );
   }
 }

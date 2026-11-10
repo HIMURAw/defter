@@ -155,3 +155,32 @@ test("objects (image, sticky note, formula) round trip and bad ones are dropped"
   const md = serializeNotebook(nb).replace('"k":"tex"', '"k":"video"');
   assert.equal(parseNotebook(md).pages[1].obj!.length, 2);
 });
+
+test("page background path with spaces survives the marker", () => {
+  const nb = emptyNotebook();
+  nb.pages = [{ text: "x", ink: [], bg: "Ekler/Deneme 1 p3.png" }];
+  const md = serializeNotebook(nb);
+  assert.match(md, /<!-- defter:page bg=Ekler%2FDeneme%201%20p3\.png -->/);
+  assert.deepEqual(parseNotebook(md), nb);
+});
+
+test("new pen kinds, shapes and objects are kept; unknown ones dropped", () => {
+  const nb = emptyNotebook();
+  nb.pages = [
+    {
+      text: "",
+      ink: [
+        { t: "pen", c: "#000", w: 2, p: [1, 2, 3, 4], y: "fountain" },
+        { t: "pen", c: "#000", w: 2, p: [0, 0, 10, 0, 5, 9], s: "poly" },
+        { t: "pen", c: "#000", w: 2, p: [0, 0, 10, 10], s: "ellipse", y: "dash" },
+      ],
+      obj: [
+        { k: "tape", x: 1, y: 2, w: 3, h: 4, v: "", c: "#f00" },
+        { k: "stamp", x: 1, y: 2, w: 3, h: 4, v: "EXAM" },
+      ],
+    },
+  ];
+  assert.deepEqual(parseNotebook(serializeNotebook(nb)), nb);
+  const bad = '---\ndefter-plugin: notebook\n---\n\n<!-- defter:page -->\n\n\n<!-- defter:ink\n{"v":1,"pages":[\n[{"t":"pen","c":"#000","w":2,"p":[1,2],"y":"crayon"},{"t":"pen","c":"#000","w":2,"p":[1,2,3,4],"s":"poly"}]\n]}\n-->\n';
+  assert.equal(parseNotebook(bad).pages[0].ink.length, 0);
+});

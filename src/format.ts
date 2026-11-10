@@ -22,19 +22,24 @@ const INK_CLOSE = "-->";
 const ESCAPE = "​";
 
 export type StrokeKind = "pen" | "hl";
-export type ShapeKind = "line" | "arrow" | "rect";
-const SHAPES: ShapeKind[] = ["line", "arrow", "rect"];
+export type ShapeKind = "line" | "arrow" | "rect" | "ellipse" | "tri" | "poly";
+const SHAPES: ShapeKind[] = ["line", "arrow", "rect", "ellipse", "tri", "poly"];
+export type PenKind = "fountain" | "pencil" | "dash";
+const PENS: PenKind[] = ["fountain", "pencil", "dash"];
 
 export interface Stroke {
   t: StrokeKind;
   c: string;
   w: number;
-  /** Freehand: x,y pairs. Shape: start and end point (4 numbers). */
+  /** Freehand: x,y pairs. Shape: start and end point (4 numbers); poly: its corners. */
   p: number[];
   s?: ShapeKind;
+  /** Pen kind; absent means a ballpoint. */
+  y?: PenKind;
 }
 
-export type ObjectKind = "img" | "note" | "tex";
+export type ObjectKind = "img" | "note" | "tex" | "tape" | "stamp";
+const OBJECT_KINDS: ObjectKind[] = ["img", "note", "tex", "tape", "stamp"];
 
 /** Things placed on a page: a picture, a sticky note or a formula. */
 export interface PageObject {
@@ -43,9 +48,9 @@ export interface PageObject {
   y: number;
   w: number;
   h: number;
-  /** img: vault path of the image · note: its text · tex: LaTeX source. */
+  /** img: vault path · note: its text · tex: LaTeX source · stamp: its label · tape: empty. */
   v: string;
-  /** note: paper colour. */
+  /** note, tape, stamp: colour. */
   c?: string;
 }
 
@@ -60,9 +65,13 @@ export interface Page {
   tpl?: string;
   /** Bookmark tab colour. */
   mark?: string;
+  /** Background picture (an imported PDF page): vault path. */
+  bg?: string;
 }
 
-const PAGE_ATTRS = ["date", "tpl", "mark"] as const;
+const PAGE_ATTRS = ["date", "tpl", "mark", "bg"] as const;
+// Values that may contain spaces are stored URI-encoded in the page marker.
+const ENCODED: readonly string[] = ["bg"];
 
 export interface Notebook {
   /** Frontmatter lines without the --- fences. Other keys (tags, aliases) are kept. */
@@ -101,7 +110,11 @@ export function isNotebookText(md: string): boolean {
 function isStroke(s: unknown): s is Stroke {
   if (!s || typeof s !== "object") return false;
   const o = s as Record<string, unknown>;
-  if (o.s !== undefined && !(SHAPES.includes(o.s as ShapeKind) && Array.isArray(o.p) && o.p.length === 4)) return false;
+  if (o.s !== undefined) {
+    if (!SHAPES.includes(o.s as ShapeKind) || !Array.isArray(o.p)) return false;
+    if (o.s === "poly" ? o.p.length < 6 : o.p.length !== 4) return false;
+  }
+  if (o.y !== undefined && !PENS.includes(o.y as PenKind)) return false;
   return (
     (o.t === "pen" || o.t === "hl") &&
     typeof o.c === "string" &&
@@ -117,7 +130,7 @@ function isObject(o: unknown): o is PageObject {
   if (!o || typeof o !== "object") return false;
   const r = o as Record<string, unknown>;
   return (
-    (r.k === "img" || r.k === "note" || r.k === "tex") &&
+    OBJECT_KINDS.includes(r.k as ObjectKind) &&
     typeof r.v === "string" &&
     ["x", "y", "w", "h"].every((key) => typeof r[key] === "number" && Number.isFinite(r[key]))
   );
@@ -144,13 +157,25 @@ const MARKER_RE = /^<!-- defter:page((?: [a-z]+=[^\s>]+)*) -->[ \t]*$/gm;
 function parseAttrs(src: string): Partial<Page> {
   const out: Partial<Page> = {};
   for (const m of src.matchAll(/ ([a-z]+)=([^\s>]+)/g)) {
-    if ((PAGE_ATTRS as readonly string[]).includes(m[1])) (out as Record<string, string>)[m[1]] = m[2];
+    if (!(PAGE_ATTRS as readonly string[]).includes(m[1])) continue;
+    let v = m[2];
+    if (ENCODED.includes(m[1])) {
+      try {
+        v = decodeURIComponent(v);
+      } catch {
+        continue;
+      }
+    }
+    (out as Record<string, string>)[m[1]] = v;
   }
   return out;
 }
 
 function marker(p: Page): string {
-  const attrs = PAGE_ATTRS.filter((a) => p[a] && /^[^\s>]+$/.test(p[a]!)).map((a) => ` ${a}=${p[a]}`).join("");
+  const attrs = PAGE_ATTRS.map((a) => [a, p[a] && ENCODED.includes(a) ? encodeURIComponent(p[a]!) : p[a]] as const)
+    .filter(([, v]) => v && /^[^\s>]+$/.test(v))
+    .map(([a, v]) => ` ${a}=${v}`)
+    .join("");
   return `<!-- defter:page${attrs} -->`;
 }
 

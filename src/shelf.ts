@@ -1,12 +1,17 @@
 import { ItemView, Menu, Modal, Notice, Setting, TFile, TFolder, debounce, moment, normalizePath, setIcon, setTooltip, type App, type WorkspaceLeaf } from "obsidian";
-import { PAGE_MARKER } from "./format";
 import { COVERS, defaultCover } from "./settings";
+import { fmtMinutes, weekMinutes } from "./timer";
 
 export const SHELF_VIEW = "defter-shelf";
 
 export interface ShelfHost {
   app: App;
-  settings: { bookcases: string[]; caseOrder: string[]; bookOrder: Record<string, string[]> };
+  settings: {
+    bookcases: string[];
+    caseOrder: string[];
+    bookOrder: Record<string, string[]>;
+    study: Record<string, Record<string, number>>;
+  };
   saveSettings(): Promise<void>;
   notebookFiles(): TFile[];
   openNotebook(file: TFile): void;
@@ -178,12 +183,14 @@ export class ShelfView extends ItemView {
     const scroll = root.scrollTop;
     const files = this.host.notebookFiles();
     const pages = new Map<TFile, number>();
-    await Promise.all(files.map(async (f) => pages.set(f, (await this.app.vault.cachedRead(f)).split(PAGE_MARKER).length - 1 || 1)));
+    await Promise.all(files.map(async (f) => pages.set(f, ((await this.app.vault.cachedRead(f)).match(/^<!-- defter:page(?: [^\n>]*)? -->$/gm) ?? []).length || 1)));
 
     root.empty();
     const head = root.createDiv("defter-lib-head");
     head.createEl("h2", { text: "Library" });
     head.createSpan({ cls: "defter-lib-count", text: files.length === 1 ? "1 notebook" : `${files.length} notebooks` });
+    const week = Object.values(this.host.settings.study).reduce((sum, days) => sum + weekMinutes(days), 0);
+    if (week) head.createSpan({ cls: "defter-lib-count defter-lib-week", text: `Studied this week: ${fmtMinutes(week)}` });
     const add = head.createEl("button", { cls: "mod-cta", text: "New bookcase" });
     add.onclick = () => this.newBookcase();
 
@@ -241,7 +248,13 @@ export class ShelfView extends ItemView {
     book.style.setProperty("--h", 150 + (h % 5) * 9 + "px");
     book.toggleClass("has-bands", h % 3 !== 0);
     book.createDiv({ cls: "defter-spine-title", text: f.basename });
-    setTooltip(book, `${f.basename} · ${n} ${n === 1 ? "page" : "pages"} · ${moment(f.stat.mtime).fromNow()}`, { placement: "top" });
+    const week = weekMinutes(this.host.settings.study[f.path]);
+    setTooltip(
+      book,
+      `${f.basename} · ${n} ${n === 1 ? "page" : "pages"} · ${moment(f.stat.mtime).fromNow()}` + (week ? ` · this week ${fmtMinutes(week)}` : ""),
+      { placement: "top" }
+    );
+    if (week) book.createDiv("defter-study-dot");
     book.draggable = true;
     book.onclick = () => this.host.openNotebook(f);
     book.oncontextmenu = (e) => {

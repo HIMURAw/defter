@@ -10,6 +10,10 @@ export function ensureMath(): Promise<void> {
 import type { PageObject } from "./format";
 
 export const NOTE_COLORS = ["#fff27a", "#ffc4dd", "#c8f5b4", "#bfe3ff"];
+export const TAPE_COLORS = ["#f4c95d", "#f29bb7", "#8fd0a8", "#93bfef", "#b9b0a2"];
+export const STAMP_COLORS = ["#c42b2b", "#1d3a8f", "#1f7a4d", "#6b3fa0"];
+/** Ready-made stamps: symbol stamps are round, word stamps are framed. */
+export const STAMPS = ["✓", "✗", "★", "!", "?", "IMPORTANT", "REVIEW", "EXAM", "LEARNED", "ASK"];
 
 /** Draws one object into a page layer. */
 export function renderObject(app: App, layer: HTMLElement, o: PageObject, ink: string): HTMLElement {
@@ -22,6 +26,14 @@ export function renderObject(app: App, layer: HTMLElement, o: PageObject, ink: s
     const f = app.vault.getAbstractFileByPath(o.v);
     if (f) el.createEl("img", { attr: { src: app.vault.getResourcePath(f as TFile), draggable: "false" } });
     else el.createDiv({ cls: "defter-obj-missing", text: "Missing image: " + o.v });
+  } else if (o.k === "tape") {
+    el.style.setProperty("--tape", o.c ?? TAPE_COLORS[0]);
+    el.setAttr("aria-label", "Click to show or hide what is under the tape");
+  } else if (o.k === "stamp") {
+    el.style.setProperty("--stamp", o.c ?? STAMP_COLORS[0]);
+    el.toggleClass("is-symbol", [...o.v].length <= 2);
+    const t = el.createDiv({ cls: "defter-stamp-text", text: o.v });
+    t.style.fontSize = Math.round(o.h * ([...o.v].length <= 2 ? 0.62 : 0.42)) + "px";
   } else if (o.k === "note") {
     el.style.setProperty("--note", o.c ?? NOTE_COLORS[0]);
     el.createDiv({ cls: "defter-note-text", text: o.v });

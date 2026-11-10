@@ -1,27 +1,31 @@
 import { MarkdownView, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, debounce, normalizePath, type ViewState } from "obsidian";
 import { DefterView, VIEW_TYPE, type DefterHost } from "./view";
-import { FRONTMATTER_KEY, emptyNotebook, fromLegacy, isNotebookText, serializeNotebook, type Notebook } from "./format";
-import { DEFAULT_SETTINGS, DefterSettingTab, type DefterSettings, type NotebookLook } from "./settings";
+import { FRONTMATTER_KEY, emptyNotebook, fromLegacy, isNotebookText, parseNotebook, serializeNotebook, type Notebook } from "./format";
+import { DefterSettingTab, freshSettings, setDateLocale, type DefterSettings, type NotebookLook } from "./settings";
 import { SHELF_VIEW, ShelfView, type ShelfHost } from "./shelf";
 import { exportPdf } from "./pdf";
-import { NewNotebookModal } from "./new-notebook";
+import { NewNotebookModal, todayStr } from "./new-notebook";
+import { StudyTimer } from "./timer";
+import { isDue, parseCards, type CardState } from "./cards";
+import { StudyModal, type StudyItem } from "./study-modal";
 
 const LEGACY_EXT = "defter";
 
 export default class DefterPlugin extends Plugin implements DefterHost, ShelfHost {
-  settings: DefterSettings = { ...DEFAULT_SETTINGS, lastPage: {}, bookcases: [], caseOrder: [], bookOrder: {} };
+  settings: DefterSettings = freshSettings(null);
   /** Leaves where the user chose "Open as Markdown", with the file they chose it for. */
   private markdownLeaves = new WeakMap<WorkspaceLeaf, string>();
   private switching = new WeakSet<WorkspaceLeaf>();
   private saveSoon = debounce(() => void this.saveSettings(), 1500, true);
+  timer!: StudyTimer;
 
   async onload() {
-    this.settings = { ...DEFAULT_SETTINGS, ...(await this.loadData()) };
-    this.settings.lastPage ??= {};
-    this.settings.bookcases ??= [];
-    this.settings.caseOrder ??= [];
-    this.settings.bookOrder ??= {};
+    this.settings = freshSettings(await this.loadData());
+    setDateLocale(this.settings.dateLocale);
     this.addSettingTab(new DefterSettingTab(this.app, this));
+    this.timer = new StudyTimer(this, this.addStatusBarItem());
+    this.registerInterval(window.setInterval(() => this.timer.tick(), 1000));
+    this.register(() => this.timer.stop());
 
     this.registerView(VIEW_TYPE, (leaf) => new DefterView(leaf, this));
     this.registerView(SHELF_VIEW, (leaf) => new ShelfView(leaf, this));
@@ -43,6 +47,8 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
       },
     });
     this.addCommand({ id: "open-journal", name: "Open today's journal page", callback: () => this.openJournal() });
+    this.addCommand({ id: "review-cards", name: "Study due flashcards in all notebooks", callback: () => void this.reviewAll() });
+    this.addCommand({ id: "stop-timer", name: "Stop the study timer", callback: () => this.timer.stop() });
     this.addCommand({
       id: "open-as-notebook",
       name: "Open this note as a notebook",
@@ -76,21 +82,79 @@ export default class DefterPlugin extends Plugin implements DefterHost, ShelfHos
     // Keep "last page" entries attached to the right file.
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        const n = this.settings.lastPage[oldPath];
-        if (n === undefined) return;
-        delete this.settings.lastPage[oldPath];
-        this.settings.lastPage[file.path] = n;
-        this.saveSoon();
+        let changed = false;
+        for (const map of [this.settings.lastPage, this.settings.cards, this.settings.study] as Record<string, unknown>[]) {
+          if (!(oldPath in map)) continue;
+          map[file.path] = map[oldPath];
+          delete map[oldPath];
+          changed = true;
+        }
+        if (changed) this.saveSoon();
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        if (file.path in this.settings.lastPage) {
-          delete this.settings.lastPage[file.path];
-          this.saveSoon();
+        // Study minutes stay (they count towards the week); progress and place go.
+        let changed = false;
+        for (const map of [this.settings.lastPage, this.settings.cards] as Record<string, unknown>[]) {
+          if (file.path in map) {
+            delete map[file.path];
+            changed = true;
+          }
         }
+        if (changed) this.saveSoon();
       })
     );
+  }
+
+  cardState(path: string, front: string): CardState | undefined {
+    return this.settings.cards[path]?.[front];
+  }
+
+  setCardState(path: string, front: string, state: CardState) {
+    (this.settings.cards[path] ??= {})[front] = state;
+    this.saveSoon();
+  }
+
+  addStudyMinute(path: string) {
+    const day = todayStr();
+    const days = (this.settings.study[path] ??= {});
+    days[day] = (days[day] ?? 0) + 1;
+    this.saveSoon();
+  }
+
+  async openAt(path: string, page: number) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    this.settings.lastPage[path] = page;
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE).find((l) => (l.view as DefterView).file?.path === path);
+    if (existing) {
+      this.app.workspace.revealLeaf(existing);
+      (existing.view as DefterView).jumpTo(page);
+      return;
+    }
+    await this.app.workspace.getLeaf(false).openFile(file);
+  }
+
+  /** Due cards from every notebook, studied in one go. */
+  async reviewAll() {
+    const today = todayStr();
+    const items: StudyItem[] = [];
+    for (const f of this.notebookFiles()) {
+      const text = await this.app.vault.cachedRead(f);
+      if (!text.includes(" :: ")) continue;
+      try {
+        const cards = parseCards(parseNotebook(text).pages);
+        for (const card of cards) if (isDue(this.cardState(f.path, card.front), today)) items.push({ card, path: f.path, notebook: f.basename });
+      } catch {
+        /* unreadable notebook: skipped */
+      }
+    }
+    if (!items.length) {
+      new Notice("No flashcards are due. Write cards as “front :: back” lines in any notebook.");
+      return;
+    }
+    new StudyModal(this.app, items, this).open();
   }
 
   async saveSettings() {

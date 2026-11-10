@@ -1,5 +1,5 @@
 // Drawing helpers shared by the notebook view and PDF export.
-import type { Stroke } from "./format";
+import type { ShapeKind, Stroke } from "./format";
 import { inkFor, type FontDef, type Tone } from "./settings";
 
 export const LINE = 36;
@@ -77,16 +77,34 @@ export function fontMetrics(font: FontDef, scale: number): FontMetrics {
   return result;
 }
 
-/** Points along a stroke, used for hit testing (eraser). */
+/** Corner points of a shape, in drawing order (closed shapes repeat the first). */
+function shapeOutline(s: Stroke): number[] {
+  const [x1, y1, x2, y2] = s.p;
+  switch (s.s) {
+    case "rect":
+      return [x1, y1, x2, y1, x2, y2, x1, y2, x1, y1];
+    case "tri":
+      return [(x1 + x2) / 2, Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2), Math.min(x1, x2), Math.max(y1, y2), (x1 + x2) / 2, Math.min(y1, y2)];
+    case "poly":
+      return [...s.p, s.p[0], s.p[1]];
+    case "ellipse": {
+      const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2, rx = Math.abs(x2 - x1) / 2, ry = Math.abs(y2 - y1) / 2;
+      const out: number[] = [];
+      for (let i = 0; i <= 48; i++) out.push(cx + rx * Math.cos((i / 48) * Math.PI * 2), cy + ry * Math.sin((i / 48) * Math.PI * 2));
+      return out;
+    }
+    default:
+      return [x1, y1, x2, y2];
+  }
+}
+
+/** Points along a stroke, used for hit testing (eraser, lasso). */
 export function strokePoints(s: Stroke): number[] {
   if (!s.s) return s.p;
-  const [x1, y1, x2, y2] = s.p;
-  const segs: number[][] =
-    s.s === "rect"
-      ? [[x1, y1, x2, y1], [x2, y1, x2, y2], [x2, y2, x1, y2], [x1, y2, x1, y1]]
-      : [[x1, y1, x2, y2]];
+  const o = shapeOutline(s);
   const out: number[] = [];
-  for (const [a, b, c, d] of segs) {
+  for (let k = 0; k + 3 < o.length; k += 2) {
+    const [a, b, c, d] = [o[k], o[k + 1], o[k + 2], o[k + 3]];
     const n = Math.max(1, Math.ceil(Math.hypot(c - a, d - b) / 6));
     for (let i = 0; i <= n; i++) out.push(a + ((c - a) * i) / n, b + ((d - b) * i) / n);
   }
@@ -107,8 +125,15 @@ function traceFree(ctx: CanvasRenderingContext2D, p: number[]) {
 
 function traceShape(ctx: CanvasRenderingContext2D, s: Stroke) {
   const [x1, y1, x2, y2] = s.p;
-  if (s.s === "rect") {
-    ctx.rect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+  if (s.s === "ellipse") {
+    ctx.ellipse((x1 + x2) / 2, (y1 + y2) / 2, Math.abs(x2 - x1) / 2, Math.abs(y2 - y1) / 2, 0, 0, Math.PI * 2);
+    return;
+  }
+  if (s.s !== "line" && s.s !== "arrow") {
+    const o = shapeOutline(s);
+    ctx.moveTo(o[0], o[1]);
+    for (let i = 2; i < o.length; i += 2) ctx.lineTo(o[i], o[i + 1]);
+    ctx.closePath();
     return;
   }
   ctx.moveTo(x1, y1);
@@ -123,32 +148,139 @@ function traceShape(ctx: CanvasRenderingContext2D, s: Stroke) {
   }
 }
 
+/**
+ * A fountain pen: the line is thinner where the hand moved fast (points far
+ * apart) and fuller where it slowed down, drawn as short overlapping segments.
+ */
+function drawFountain(ctx: CanvasRenderingContext2D, s: Stroke) {
+  const p = s.p;
+  if (p.length < 6) {
+    ctx.beginPath();
+    ctx.lineWidth = s.w;
+    traceFree(ctx, p);
+    ctx.stroke();
+    return;
+  }
+  let width = s.w;
+  let px = p[0], py = p[1];
+  for (let i = 2; i < p.length; i += 2) {
+    const nx = i + 2 < p.length ? (p[i] + p[i + 2]) / 2 : p[i];
+    const ny = i + 2 < p.length ? (p[i + 1] + p[i + 3]) / 2 : p[i + 1];
+    const speed = Math.hypot(p[i] - p[i - 2], p[i + 1] - p[i - 1]);
+    const target = s.w * Math.max(0.45, Math.min(1.45, 1.5 - speed / 14));
+    width += (target - width) * 0.35;
+    ctx.beginPath();
+    ctx.lineWidth = width;
+    ctx.moveTo(px, py);
+    ctx.quadraticCurveTo(p[i], p[i + 1], nx, ny);
+    ctx.stroke();
+    px = nx;
+    py = ny;
+  }
+}
+
+export function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke, tone: Tone) {
+  ctx.strokeStyle = s.t === "hl" ? s.c : inkFor(s.c, tone);
+  ctx.globalAlpha = s.t === "hl" ? (tone === "dark" ? 0.32 : 0.42) : s.y === "pencil" ? 0.72 : 1;
+  ctx.setLineDash(s.y === "dash" ? [s.w * 3 + 4, s.w * 2.4 + 5] : []);
+  if (s.y === "fountain" && !s.s) {
+    drawFountain(ctx, s);
+    return;
+  }
+  ctx.beginPath();
+  ctx.lineWidth = s.y === "pencil" ? Math.max(1.2, s.w * 0.8) : s.w;
+  if (s.s) traceShape(ctx, s);
+  else traceFree(ctx, s.p);
+  ctx.stroke();
+}
+
 export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: Stroke[], tone: Tone) {
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  for (const s of strokes) {
-    ctx.beginPath();
-    ctx.strokeStyle = s.t === "hl" ? s.c : inkFor(s.c, tone);
-    ctx.lineWidth = s.w;
-    ctx.globalAlpha = s.t === "hl" ? (tone === "dark" ? 0.32 : 0.42) : 1;
-    if (s.s) traceShape(ctx, s);
-    else traceFree(ctx, s.p);
-    ctx.stroke();
-  }
+  for (const s of strokes) drawStroke(ctx, s, tone);
   ctx.globalAlpha = 1;
+  ctx.setLineDash([]);
 }
 
-/** Snaps a shape end point: 45° steps for lines, squares for boxes. */
+/** Snaps a shape end point: 45° steps for lines, squares, circles and even triangles. */
 export function snapShape(kind: string, x1: number, y1: number, x2: number, y2: number): [number, number] {
   const dx = x2 - x1;
   const dy = y2 - y1;
-  if (kind === "rect") {
+  if (kind === "rect" || kind === "ellipse" || kind === "tri") {
     const d = Math.max(Math.abs(dx), Math.abs(dy));
-    return [x1 + Math.sign(dx || 1) * d, y1 + Math.sign(dy || 1) * d];
+    const h = kind === "tri" ? d * 0.866 : d;
+    return [x1 + Math.sign(dx || 1) * d, y1 + Math.sign(dy || 1) * h];
   }
   const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
   const len = Math.hypot(dx, dy);
   return [x1 + Math.cos(ang) * len, y1 + Math.sin(ang) * len];
+}
+
+/** Light smoothing for a finished freehand line: removes mouse jitter, keeps the ends. */
+export function smoothPoints(p: number[]): number[] {
+  if (p.length < 8) return p;
+  const out = [p[0], p[1]];
+  for (let i = 2; i < p.length - 2; i += 2) {
+    out.push((p[i - 2] + p[i] * 2 + p[i + 2]) / 4, (p[i - 1] + p[i + 1] * 2 + p[i + 3]) / 4);
+  }
+  out.push(p[p.length - 2], p[p.length - 1]);
+  return out.map((n) => Math.round(n * 2) / 2);
+}
+
+function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
+  return Math.hypot(px - ax - t * dx, py - ay - t * dy);
+}
+
+/** Ramer–Douglas–Peucker: the corners of a hand-drawn path. */
+function simplify(p: number[], eps: number): number[] {
+  if (p.length <= 4) return p;
+  const [ax, ay, bx, by] = [p[0], p[1], p[p.length - 2], p[p.length - 1]];
+  let best = -1, at = 0;
+  for (let i = 2; i < p.length - 2; i += 2) {
+    const d = distToSegment(p[i], p[i + 1], ax, ay, bx, by);
+    if (d > best) [best, at] = [d, i];
+  }
+  if (best <= eps) return [ax, ay, bx, by];
+  const left = simplify(p.slice(0, at + 2), eps);
+  return [...left.slice(0, -2), ...simplify(p.slice(at), eps)];
+}
+
+/**
+ * Recognises a held freehand line as a clean shape: straight line, triangle,
+ * four-cornered shape or ellipse. Returns null when it looks like writing.
+ */
+export function recognizeShape(p: number[]): { s: ShapeKind; p: number[] } | null {
+  if (p.length < 8) return null;
+  const b = { x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity };
+  let length = 0;
+  for (let i = 0; i < p.length; i += 2) {
+    b.x1 = Math.min(b.x1, p[i]);
+    b.x2 = Math.max(b.x2, p[i]);
+    b.y1 = Math.min(b.y1, p[i + 1]);
+    b.y2 = Math.max(b.y2, p[i + 1]);
+    if (i) length += Math.hypot(p[i] - p[i - 2], p[i + 1] - p[i - 1]);
+  }
+  const diag = Math.hypot(b.x2 - b.x1, b.y2 - b.y1);
+  if (diag < 24) return null;
+  const [sx, sy, ex, ey] = [p[0], p[1], p[p.length - 2], p[p.length - 1]];
+  const gap = Math.hypot(ex - sx, ey - sy);
+  if (gap > diag * 0.3) {
+    // Open path: a straight line if nothing strays far from the chord.
+    let worst = 0;
+    for (let i = 0; i < p.length; i += 2) worst = Math.max(worst, distToSegment(p[i], p[i + 1], sx, sy, ex, ey));
+    return worst < Math.max(6, gap * 0.08) && length < gap * 1.25 ? { s: "line", p: [sx, sy, ex, ey] } : null;
+  }
+  const closed = [...p, sx, sy];
+  const corners = simplify(closed, diag * 0.09);
+  const n = corners.length / 2 - 1; // the last point repeats the first
+  if (n === 3 || n === 4) {
+    const pts = corners.slice(0, -2).map((v) => Math.round(v * 2) / 2);
+    return { s: "poly", p: pts };
+  }
+  return { s: "ellipse", p: [b.x1, b.y1, b.x2, b.y2].map((v) => Math.round(v * 2) / 2) };
 }
 
 // ---- Markdown marks on the handwriting ------------------------------------
@@ -169,7 +301,21 @@ export function lineFormats(line: string): string[] {
     add(head[0].length, line.length, "h");
   }
   const li = /^(\s*)([-*]) /.exec(line);
-  if (li && !head) add(li[1].length, li[1].length + 1, "li");
+  const todo = /^(\s*(?:[-*] )?)\[([ xX])\] /.exec(line);
+  if (li && !head && !todo) add(li[1].length, li[1].length + 1, "li");
+  if (todo && !head) {
+    const at = todo[1].length;
+    if (todo[1].trim()) add(todo[1].length - 2, todo[1].length - 1, "m");
+    const done = todo[2] !== " ";
+    add(at, at + 1, done ? "cb cb0 is-done" : "cb cb0");
+    add(at + 1, at + 3, "cb");
+    if (done) add(at + 4, line.length, "done");
+  }
+  const card = line.indexOf(" :: ");
+  if (card > 0 && !head) {
+    add(card + 1, card + 3, "m");
+    add(card + 4, line.length, "back");
+  }
   const inline: [RegExp, string, number][] = [
     [/\*\*(?=\S)(.+?)\*\*/g, "b", 2],
     [/==(?=\S)(.+?)==/g, "hl", 2],
@@ -183,6 +329,15 @@ export function lineFormats(line: string): string[] {
     }
   }
   return f;
+}
+
+/** Range of the "[ ]" checkbox on the line holding `pos`, when the click is on it. */
+export function checkboxAt(text: string, pos: number): number | null {
+  const start = text.lastIndexOf("\n", pos - 1) + 1;
+  const m = /^(\s*(?:[-*] )?)\[([ xX])\] /.exec(text.slice(start));
+  if (!m) return null;
+  const at = start + m[1].length;
+  return pos >= at && pos <= at + 3 ? at : null;
 }
 
 /** The [[link]] target at a text position, if any. */
