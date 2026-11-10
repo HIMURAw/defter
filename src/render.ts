@@ -1,5 +1,5 @@
 // Drawing helpers shared by the notebook view and PDF export.
-import type { ShapeKind, Stroke } from "./format";
+import { colorRuns, type ShapeKind, type Stroke } from "./format";
 import { inkFor, type FontDef, type Tone } from "./settings";
 import { SYMBOL_NAMES } from "./symbols";
 
@@ -324,6 +324,10 @@ export function lineFormats(line: string): string[] {
   const add = (from: number, to: number, flag: string) => {
     for (let i = from; i < to; i++) f[i] = f[i] ? f[i] + " " + flag : flag;
   };
+  colorRuns(line).forEach((c, i) => {
+    if (c === -1) add(i, i + 1, "mh");
+    else if (c !== null) add(i, i + 1, "tc" + c);
+  });
   const head = /^(#{1,3}) /.exec(line);
   if (head) {
     add(0, head[0].length, "m");

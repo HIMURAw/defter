@@ -1,5 +1,9 @@
 import { Menu, Modal, Notice, Platform, Scope, Setting, TextFileView, normalizePath, setIcon, type App, type WorkspaceLeaf } from "obsidian";
 import {
+  COLOR_CLOSE,
+  colorAt,
+  colorMark,
+  stripColors,
   emptyNotebook,
   emptyPage,
   getProp,
@@ -32,7 +36,7 @@ import {
   wobble,
   type PageDims,
 } from "./render";
-import { ANIM, HIGHLIGHTS, INKS, fmtDate, inkFor, resolveLook, type DefterSettings, type NotebookLook, type Sticker } from "./settings";
+import { ANIM, HIGHLIGHTS, INKS, TEXT_COLORS, applyTextColors, fmtDate, inkFor, resolveLook, type DefterSettings, type NotebookLook, type Sticker } from "./settings";
 import { parseCards, isDue, type CardState } from "./cards";
 import { StudyModal, type StudyHost } from "./study-modal";
 import type { StudyTimer } from "./timer";
@@ -484,6 +488,7 @@ export class DefterView extends TextFileView {
       st.setProperty("--defter-size", m.size + "px");
       st.setProperty("--defter-top", m.top + "px");
       st.setProperty("--defter-ink", inkFor(ink, tone));
+      applyTextColors(this.sheetEl, tone);
       st.setProperty("--defter-anim", ANIM[this.host.settings.anim] + "ms");
     };
     apply();
@@ -551,6 +556,10 @@ export class DefterView extends TextFileView {
 
     this.registerDomEvent(this.textEl, "input", (e) => this.onTextInput(e as InputEvent));
     this.registerDomEvent(this.textEl, "keydown", (e) => this.onTextKey(e));
+    // The active text colour follows the caret.
+    const follow = () => this.tool === "write" && this.renderTextColors();
+    this.registerDomEvent(this.textEl, "keyup", follow);
+    this.registerDomEvent(this.textEl, "mouseup", follow);
     this.registerDomEvent(this.textEl, "click", (e) => this.onTextClick(e));
     this.registerDomEvent(this.inkCanvas, "pointerdown", (e) => this.onPointerDown(e));
     this.registerDomEvent(this.inkCanvas, "pointermove", (e) => this.onPointerMove(e));
@@ -704,7 +713,8 @@ export class DefterView extends TextFileView {
     this.swatchesEl.empty();
     this.widthsEl.empty();
     const colored = this.tool === "pen" || this.tool === "hl" || this.tool === "shape" || this.tool === "pad";
-    this.swatchesEl.toggle(colored);
+    this.swatchesEl.toggle(colored || this.tool === "write");
+    if (this.tool === "write") this.renderTextColors();
     this.widthsEl.toggle(this.tool === "pen" || this.tool === "shape" || this.tool === "pad");
     setIcon(this.toolButtons.shape!, SHAPE_DEFS.find((s) => s.id === this.shapeKind)!.icon);
     if (!colored) return;
@@ -1251,8 +1261,74 @@ export class DefterView extends TextFileView {
     if (this.studyMode) this.applyStudy();
   }
 
-  /** Tab after "12*3+4 =" writes the result. */
+  // ---- Text colour ------------------------------------------------------------
+
+  /** In write mode the swatches colour the text: the selection, or what comes next. */
+  private renderTextColors() {
+    this.swatchesEl.empty();
+    const current = colorAt(this.textEl.value, this.textEl.selectionStart);
+    const swatch = (i: number | null, color: string, label: string) => {
+      const b = this.swatchesEl.createEl("button", { cls: "defter-swatch" });
+      b.style.setProperty("--swatch", color);
+      b.setAttr("aria-label", label);
+      b.toggleClass("is-active", current === i);
+      if (i === null) b.addClass("defter-swatch-default");
+      // Keep the text field focused (and its selection) while clicking.
+      b.onmousedown = (e) => e.preventDefault();
+      b.onclick = () => this.setTextColor(i);
+    };
+    swatch(null, inkFor(this.look.ink, this.look.tone), T("Text colour: notebook ink"));
+    TEXT_COLORS.forEach((c, i) => {
+      if (c.id === this.look.ink) return;
+      swatch(i, this.look.tone === "dark" ? c.dark : c.id, T("Text colour: {name}", { name: T(c.label) }));
+    });
+  }
+
+  private setTextColor(i: number | null) {
+    const ta = this.textEl;
+    ta.focus({ preventScroll: true });
+    const [a, b] = [ta.selectionStart, ta.selectionEnd];
+    if (a !== b) {
+      const plain = stripColors(ta.value.slice(a, b));
+      // Lines are coloured one by one, so a run never spans a line break.
+      const out = i === null ? plain : plain.split("\n").map((l) => (l ? colorMark(i) + l + COLOR_CLOSE : l)).join("\n");
+      document.execCommand("insertText", false, out);
+      ta.setSelectionRange(a, a + out.length);
+    } else {
+      const now = colorAt(ta.value, a);
+      if (now === i) return this.renderTextColors();
+      // Close a run we are inside (step over its own close mark when it is right here),
+      // then open the new colour with nothing in it yet.
+      let close = now !== null ? COLOR_CLOSE : "";
+      if (close && ta.value[a] === COLOR_CLOSE) {
+        ta.setSelectionRange(a + 1, a + 1);
+        close = "";
+        if (i === null) return this.renderTextColors();
+        document.execCommand("insertText", false, colorMark(i) + COLOR_CLOSE);
+        ta.setSelectionRange(a + 3, a + 3);
+        return this.renderTextColors();
+      }
+      const open = i !== null ? colorMark(i) + COLOR_CLOSE : "";
+      if (close || open) {
+        document.execCommand("insertText", false, close + open);
+        const caret = a + close.length + (open ? open.length - 1 : 0);
+        ta.setSelectionRange(caret, caret);
+      }
+    }
+    this.renderTextColors();
+  }
+
+  /** Tab after "12*3+4 =" writes the result; Enter carries the text colour on. */
   private onTextKey(e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing) {
+      const ta = this.textEl;
+      const c = ta.selectionStart === ta.selectionEnd ? colorAt(ta.value, ta.selectionStart) : null;
+      if (c !== null) {
+        e.preventDefault();
+        document.execCommand("insertText", false, COLOR_CLOSE + "\n" + colorMark(c));
+        return;
+      }
+    }
     if (e.key !== "Tab" || e.shiftKey || e.ctrlKey || e.altKey || !this.host.settings.calculator) return;
     const ta = this.textEl;
     const pos = ta.selectionStart;

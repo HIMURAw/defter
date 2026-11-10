@@ -20,6 +20,7 @@ Handwritten notes are easier to remember and nicer to look at, but most of us ty
 
 - **Handwriting as you type.** Four handwriting fonts (Caveat, Kalam, Patrick Hand, Shantell Sans), or **your own handwriting** as a font. Each letter is drawn like a pen stroke; text always sits on the lines.
 - **Markdown that looks like ink.** `# heading`, `**bold**`, `==marker==`, `- lists`, `[ ] to-dos` you can tick, and `[[links]]`.
+- **Coloured text.** In write mode the pencil case shows eight ink colours: colour the selection, or keep typing in a colour. The colour is stored with invisible marks, so the Markdown file still reads cleanly.
 - **Pages that turn.** When a page is full, writing continues on the next one. Two pages lie open side by side on a wide screen, with a page-turn animation.
 - **Maths without a maths keyboard.** `\sqrt` → √, `\pi` → π, `<=` → ≤, `!=` → ≠, `->` → →; `x^2` and `a_1` are written small and high or low; `√(a+b)` gets its bar. Symbols the fonts lack are drawn by hand. A **Σ panel** has every symbol, and a **calculator** answers `12*3+4 =` when you press Tab. Formulas in an **easy syntax** (`sqrt(x+1)/2`) or LaTeX.
 

@@ -93,6 +93,19 @@ export const INKS: { id: string; label: string; dark: string }[] = [
   { id: "#6b3fa0", label: "Purple", dark: "#cfb0ff" },
 ];
 
+/** Colours for typed text: the inks plus a few more. */
+export const TEXT_COLORS: { id: string; label: string; dark: string }[] = [
+  ...INKS,
+  { id: "#d0661a", label: "Orange", dark: "#ffb27a" },
+  { id: "#c2407a", label: "Pink", dark: "#ff9ec7" },
+  { id: "#6b6b6b", label: "Grey", dark: "#bdbdbd" },
+];
+
+/** Sets --tc0… on a page so coloured text follows the paper tone. */
+export function applyTextColors(el: HTMLElement, tone: Tone) {
+  TEXT_COLORS.forEach((c, i) => el.style.setProperty("--tc" + i, tone === "dark" ? c.dark : c.id));
+}
+
 export const HIGHLIGHTS = ["#ffe14d", "#ff9ec7", "#8ee88e", "#8fd3ff"];
 
 export const COVERS = ["#2f4f7f", "#8c2f39", "#2e6b4f", "#b7692c", "#5b3f8c", "#3d3d3d", "#2f7f7a", "#a63d6b"];

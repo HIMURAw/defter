@@ -465,4 +465,9 @@ export const tr: Record<string, string> = {
   "This notebook is private, but imported PDF pages are saved as pictures and are not encrypted.": "Bu defter özel, ama içe aktarılan PDF sayfaları resim olarak kaydedilir ve şifrelenmez.",
   "The exported PDF is not encrypted.": "Dışa aktarılan PDF şifreli değil.",
   "The page image is not encrypted.": "Sayfa resmi şifreli değil.",
+  "Text colour: notebook ink": "Yazı rengi: defterin mürekkebi",
+  "Text colour: {name}": "Yazı rengi: {name}",
+  "Orange": "Turuncu",
+  "Pink": "Pembe",
+  "Grey": "Gri",
 };

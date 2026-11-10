@@ -192,3 +192,18 @@ test("stylus pressure is kept with its points, broken pressure lists are dropped
   const bad = '---\ndefter-plugin: notebook\n---\n\n<!-- defter:page -->\n\n\n<!-- defter:ink\n{"v":1,"pages":[\n[{"t":"pen","c":"#000","w":2,"p":[1,2,3,4],"q":[0.5]}]\n]}\n-->\n';
   assert.equal(parseNotebook(bad).pages[0].ink.length, 0);
 });
+
+test("text colour marks: runs, colour at the caret, stripping", async () => {
+  const { colorMark, COLOR_CLOSE, colorRuns, colorAt, stripColors, pageTitle } = await import("../src/format.ts");
+  const line = "a" + colorMark(2) + "bc" + COLOR_CLOSE + "d";
+  assert.deepEqual(colorRuns(line), [null, -1, -1, 2, 2, -1, null]);
+  assert.equal(colorAt(line, 4), 2);
+  assert.equal(colorAt(line, 3), 2);
+  assert.equal(colorAt(line, line.length), null);
+  assert.equal(colorAt("x" + colorMark(5), 3), 5);
+  assert.equal(stripColors(line), "abcd");
+  assert.equal(pageTitle("# " + colorMark(1) + "Title" + COLOR_CLOSE), "Title");
+  const nb = emptyNotebook();
+  nb.pages = [{ text: line, ink: [] }];
+  assert.deepEqual(parseNotebook(serializeNotebook(nb)), nb);
+});

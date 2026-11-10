@@ -276,11 +276,65 @@ export function setProp(frontmatter: string, key: string, value: string | null):
   return frontmatter ? `${frontmatter}\n${line}` : line;
 }
 
+// ---- Text colour -------------------------------------------------------------
+// Coloured text is wrapped in invisible marks: U+2063 + a variation selector
+// (the colour number) before it, U+2064 after it. They have no width, so the
+// handwriting keeps its spacing and the Markdown file still reads cleanly.
+
+export const COLOR_OPEN = "\u2063";
+export const COLOR_CLOSE = "\u2064";
+const SELECTOR = 0xfe00;
+
+export const colorMark = (i: number) => COLOR_OPEN + String.fromCharCode(SELECTOR + i);
+
+export function stripColors(text: string): string {
+  return text.replace(/\u2063[\ufe00-\ufe0f]?|\u2064/g, "");
+}
+
+/**
+ * For each character of a line: -1 for a colour mark, the colour number
+ * inside a coloured run, or null for normal ink.
+ */
+export function colorRuns(line: string): (number | null)[] {
+  const out: (number | null)[] = [];
+  let current: number | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === COLOR_OPEN) {
+      const sel = line.charCodeAt(i + 1) - SELECTOR;
+      out.push(-1);
+      if (sel >= 0 && sel < 16) {
+        out.push(-1);
+        i++;
+        current = sel;
+      }
+    } else if (c === COLOR_CLOSE) {
+      out.push(-1);
+      current = null;
+    } else out.push(current);
+  }
+  return out;
+}
+
+/** The colour at a text position (inside an open run), or null. */
+export function colorAt(text: string, pos: number): number | null {
+  const lineStart = text.lastIndexOf("\n", pos - 1) + 1;
+  const runs = colorRuns(text.slice(lineStart, pos));
+  let last: number | null = null;
+  for (const r of runs) if (r !== -1) last = r;
+  // A run that was just opened has no characters yet.
+  const before = text.slice(lineStart, pos);
+  const open = before.lastIndexOf(COLOR_OPEN);
+  const close = before.lastIndexOf(COLOR_CLOSE);
+  if (open > close) return before.charCodeAt(open + 1) - SELECTOR;
+  return close > open ? null : last;
+}
+
 /** Text of the page shown in lists: first heading or first non-empty line. */
 export function pageTitle(text: string): string {
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   const heading = lines.find((l) => /^#{1,3} /.test(l));
-  return (heading ?? lines[0] ?? "").replace(/^#{1,3} /, "").replace(/\*\*|==|\[\[|\]\]/g, "");
+  return stripColors(heading ?? lines[0] ?? "").replace(/^#{1,3} /, "").replace(/\*\*|==|\[\[|\]\]/g, "");
 }
 
 /** Converts the JSON prototype format (.defter files) to a notebook. */

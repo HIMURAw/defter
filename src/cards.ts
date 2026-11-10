@@ -1,6 +1,9 @@
 // Flashcards written in a notebook as `front :: back` lines, reviewed with a
 // five-box Leitner schedule. Pure functions, tested with plain Node.
 
+// Same as stripColors in format.ts (kept here so this file has no imports).
+const stripColors = (t: string) => t.replace(/\u2063[\ufe00-\ufe0f]?|\u2064/g, "");
+
 export interface Card {
   front: string;
   back: string;
@@ -21,7 +24,7 @@ export type Grade = "again" | "good" | "easy";
 export const BOX_DAYS = [0, 1, 2, 4, 8, 16];
 
 const strip = (s: string) =>
-  s
+  stripColors(s)
     .replace(/^\s*(?:#{1,3} |[-*] |\[[ xX]\] )+/, "")
     .replace(/\*\*|==|\[\[|\]\]/g, "")
     .trim();

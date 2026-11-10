@@ -4,7 +4,7 @@ import type { App } from "obsidian";
 import type { Notebook } from "./format";
 import { applyBox, drawDecor, drawObjects, pageBox } from "./page-decor";
 import { applyDims, drawStrokes, fontMetrics, lineFormats, pageDims, wobble } from "./render";
-import { inkFor, type NotebookLook } from "./settings";
+import { applyTextColors, inkFor, type NotebookLook } from "./settings";
 
 export function renderStaticPage(app: App, root: HTMLElement, title: string, page: Notebook["pages"][number], n: number, look: NotebookLook) {
   const { text, ink } = page;
@@ -24,6 +24,7 @@ export function renderStaticPage(app: App, root: HTMLElement, title: string, pag
   sheet.style.setProperty("--defter-size", m.size + "px");
   sheet.style.setProperty("--defter-top", m.top + "px");
   sheet.style.setProperty("--defter-ink", inkFor(look.ink, look.tone));
+  applyTextColors(sheet, look.tone);
 
   const layer = (kind: "hl" | "pen") => {
     const c = sheet.createEl("canvas", { cls: "defter-layer " + (kind === "hl" ? "defter-hl" : "defter-ink") });
